@@ -1,43 +1,31 @@
-#!/usr/bin/env python3
-"""Arm or disarm the PX4 vehicle, then exit.
+from setuptools import find_packages, setup
 
-Usage: ros2 run px4_arm arm_node [arm|disarm]
-"""
+package_name = 'px4_control'
 
-import sys
-
-import rclpy
-from rclpy.node import Node
-
-from px4_msgs.msg import VehicleCommand
-
-
-def main():
-    action = sys.argv[1] if len(sys.argv) > 1 else 'arm'
-    if action not in ('arm', 'disarm'):
-        print(f"unknown action '{action}', expected 'arm' or 'disarm'")
-        return 1
-
-    rclpy.init()
-    node = Node('arm_node')
-    pub = node.create_publisher(VehicleCommand, '/fmu/in/vehicle_command', 1)
-
-    # Wait for the uXRCE-DDS bridge, otherwise the command goes nowhere.
-    while pub.get_subscription_count() == 0:
-        rclpy.spin_once(node, timeout_sec=0.1)
-
-    msg = VehicleCommand()
-    msg.command = VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM
-    msg.param1 = 1.0 if action == 'arm' else 0.0
-    msg.target_system = 1
-    msg.target_component = 1
-    pub.publish(msg)
-
-    node.get_logger().info(action.upper())
-    rclpy.spin_once(node, timeout_sec=0.5)
-    rclpy.shutdown()
-    return 0
-
-
-if __name__ == '__main__':
-    sys.exit(main())
+setup(
+    name=package_name,
+    version='0.0.1',
+    packages=find_packages(exclude=['test']),
+    data_files=[
+        ('share/ament_index/resource_index/packages',
+            ['resource/' + package_name]),
+        ('share/' + package_name, ['package.xml']),
+    ],
+    install_requires=['setuptools'],
+    zip_safe=True,
+    maintainer='kiwi',
+    maintainer_email='lehuo10@rowan.edu',
+    description='Control package for PX4',
+    license='ROWAN',
+    extras_require={
+        'test': [
+            'pytest',
+        ],
+    },
+    entry_points={
+        'console_scripts': [
+            'offboard_arm = px4_control.offboard_arm:main',
+            'takeoff_land = px4_control.takeoff_land:main',
+        ],
+    },
+)

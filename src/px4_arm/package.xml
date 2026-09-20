@@ -1,14 +1,14 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>px4_arm</name>
+  <name>px4_control</name>
   <version>0.0.1</version>
-  <description>Minimal node that arms a PX4 vehicle over the uXRCE-DDS bridge.</description>
-  <maintainer email="lequyphuong1903@gmail.com">kiwi</maintainer>
-  <license>MIT</license>
+  <description>Control package for PX4</description>
+  <maintainer email="lephuo10@rowan.edu">Phuong Le</maintainer>
+  <license>ROWAN</license>
 
-  <exec_depend>rclpy</exec_depend>
-  <exec_depend>px4_msgs</exec_depend>
+  <depend>rclpy</depend>
+  <depend>px4_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
