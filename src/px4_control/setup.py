@@ -1,6 +1,6 @@
 from setuptools import setup
 
-package_name = 'px4_arm'
+package_name = 'px4_control'
 
 setup(
     name=package_name,
@@ -12,7 +12,8 @@ setup(
     ],
     entry_points={
         'console_scripts': [
-            'arm_node = px4_arm.arm_node:main',
+            'takeoff_land = px4_control.takeoff_land:main',
+            'offboard_node = px4_control.offboard_node:main',
         ],
     },
 )
