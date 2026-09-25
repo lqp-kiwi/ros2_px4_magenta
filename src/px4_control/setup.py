@@ -13,7 +13,8 @@ setup(
     entry_points={
         'console_scripts': [
             'takeoff_land = px4_control.takeoff_land:main',
-            'offboard_node = px4_control.offboard_node:main',
+            'arm_node = px4_control.arm_node:main',
+            'takeoff_land_mission = px4_control.takeoff_land_mission:main',
         ],
     },
 )

@@ -30,33 +30,33 @@ class TakeoffLandNode(Node):
         self.timer = self.create_timer(1.0, self.timer_callback)
         self.seconds_passed = 0
         
-        self.target_system = 10 
+        self.target_system = 10
 
     def timer_callback(self):
         self.seconds_passed += 1
 
         if self.seconds_passed == 1:
             self.arm()
-        elif self.seconds_passed == 2:
+        elif self.seconds_passed == 5:
             # Takeoff command after 1 second of arming
-            self.takeoff(altitude=1.5)
-        elif self.seconds_passed == 15:
+            self.takeoff(altitude=5.0)
+        elif self.seconds_passed == 20:
             # After 13 seconds of flying at a constant altitude, send the Land command
             self.land()
-        elif self.seconds_passed == 25:
+        elif self.seconds_passed == 30:
             # Lock the drone after 10 seconds of landing
             self.disarm()
-        elif self.seconds_passed > 26:
+        elif self.seconds_passed > 40:
             self.get_logger().info(">>> Completed Takeoff and Landing. Shutting down Node...")
             raise SystemExit 
 
     def arm(self):
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
-        self.get_logger().info(f">>> Sent ARM đến Vehicle {self.target_system} <<<")
+        self.get_logger().info(f">>> Sent ARM to Vehicle {self.target_system} <<<")
 
     def disarm(self):
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=0.0)
-        self.get_logger().info(f">>> Sent DISARM đến Vehicle {self.target_system} <<<")
+        self.get_logger().info(f">>> Sent DISARM to Vehicle {self.target_system} <<<")
 
     def takeoff(self, altitude=1.5):
         # Param7 in NAV_TAKEOFF: attidue to take off (meters)
