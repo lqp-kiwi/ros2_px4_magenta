@@ -6,4 +6,4 @@
 	url = https://github.com/eProsima/Micro-XRCE-DDS-Agent.git
 [submodule = "src/OrbbecSDK_ROS2"]
 	path = src/OrbbecSDK_ROS2
-	url = https://github.com/orbbec/OrbbecSDK_ROS2
+	url = https://github.com/orbbec/OrbbecSDK_ROS2.git
