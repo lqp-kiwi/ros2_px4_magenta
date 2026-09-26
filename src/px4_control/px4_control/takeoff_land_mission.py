@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 takeoff_land_mission.py  (ROS2 + PX4 uXRCE-DDS)
 
