@@ -27,6 +27,7 @@ setup(
             'offboard_arm = px4_control.offboard_arm:main',
             'takeoff_land_classic = px4_control.takeoff_land_classic:main',
             'takeoff_land_mission = px4_control.takeoff_land_mission:main',
+            'record_drone_state = px4_control.record_drone_state:main',
         ],
     },
 )
