@@ -1,0 +1,8 @@
+# Turn the SIYI gimbal to an angle and wait until it gets there
+float32 yaw     # deg, A8 mini: -135 .. 135 (0 = forward)
+float32 pitch   # deg, A8 mini: -90 (looking down) .. 25
+---
+bool success
+string message
+float32 yaw     # angle actually reached
+float32 pitch
