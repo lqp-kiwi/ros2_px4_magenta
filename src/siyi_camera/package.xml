@@ -4,8 +4,8 @@
   <name>siyi_camera</name>
   <version>0.0.0</version>
   <description>TODO: Package description</description>
-  <maintainer email="lequyphuong1903@gmail.com">kiwi</maintainer>
-  <license>MIT</license>
+  <maintainer email="rowan@todo.todo">rowan</maintainer>
+  <license>TODO: License declaration</license>
 
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>

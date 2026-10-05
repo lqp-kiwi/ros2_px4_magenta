@@ -13,10 +13,10 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='kiwi',
-    maintainer_email='lequyphuong1903@gmail.com',
+    maintainer='rowan',
+    maintainer_email='rowan@todo.todo',
     description='TODO: Package description',
-    license='MIT',
+    license='TODO: License declaration',
     extras_require={
         'test': [
             'pytest',
@@ -24,7 +24,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'take_photo = siyi_camera.take_photo:main',
+            'camera_node = siyi_camera.camera_node:main',
+            'gimbal_node = siyi_camera.gimbal_node:main',
+            'take_photo = siyi_camera.take_photo:main'
         ],
     },
 )
