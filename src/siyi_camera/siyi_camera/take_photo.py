@@ -6,16 +6,13 @@ ROS2 services to move the gimbal and take photos with the SIYI camera (A8 mini).
     /siyi/set_gimbal          -> turn gimbal to (yaw, pitch) and wait until it gets there
     /siyi/take_photo_sd       -> photo saved on the camera SD card (UDP command)
     /siyi/take_photo_onboard  -> frame from RTSP video saved on the Jetson (1080p, fast)
-    /siyi/take_photo_4k       -> photo on SD card, then downloaded to the Jetson (full 4K)
 
 Run:
-    ros2 run siyi_camera siyi_photo
+    ros2 run siyi_camera take_photo
     ros2 service call /siyi/set_gimbal siyi_interfaces/srv/SetGimbal "{yaw: 0.0, pitch: -90.0}"
     ros2 service call /siyi/take_photo_sd std_srvs/srv/Trigger
     ros2 service call /siyi/take_photo_onboard std_srvs/srv/Trigger
-    ros2 service call /siyi/take_photo_4k std_srvs/srv/Trigger
 
-Authors: Phuong Le (lephuo10@rowan.edu)
 """
 
 import json
@@ -58,7 +55,7 @@ class SiyiPhoto(Node):
         self.ip = self.declare_parameter("ip", "192.168.144.25").value
         self.port = self.declare_parameter("port", 37260).value
         self.url = self.declare_parameter("rtsp_url", "rtsp://192.168.144.25:8554/main.264").value
-        self.save_dir = os.path.expanduser(self.declare_parameter("save_dir", "~/px4_ros2_ws").value)
+        self.save_dir = os.path.expanduser(self.declare_parameter("save_dir", "~/ros2_depth_camera_ws").value)
         os.makedirs(self.save_dir, exist_ok=True)
 
         # UDP socket for SIYI commands (SD card photo)
@@ -73,8 +70,7 @@ class SiyiPhoto(Node):
         self.create_service(SetGimbal, "/siyi/set_gimbal", self.set_gimbal)
         self.create_service(Trigger, "/siyi/take_photo_sd", self.take_photo_sd)
         self.create_service(Trigger, "/siyi/take_photo_onboard", self.take_photo_onboard)
-        self.create_service(Trigger, "/siyi/take_photo_4k", self.take_photo_4k)
-        self.get_logger().info(f"Ready: set_gimbal, take_photo_sd, take_photo_onboard, take_photo_4k -> {self.save_dir}")
+        self.get_logger().info(f"Ready: set_gimbal, take_photo_sd, take_photo_onboard -> {self.save_dir}")
 
     # ---------------- SD card ----------------
 
@@ -190,63 +186,6 @@ class SiyiPhoto(Node):
 
         self.get_logger().info(response.message)
         return response
-
-    # ---------------- 4K: SD card + download ----------------
-
-    def take_photo_4k(self, request, response):
-        try:
-            before = self.sd_files()
-        except OSError as e:
-            response.success, response.message = False, f"Camera web server not reachable: {e}"
-            self.get_logger().info(response.message)
-            return response
-
-        ok, msg = self.sd_photo()
-        if not ok:
-            response.success, response.message = False, msg
-            self.get_logger().info(msg)
-            return response
-
-        # Wait for the new file to show up on the SD card (camera needs ~1-2 s to write it)
-        new = []
-        end = time.time() + 10.0
-        while not new and time.time() < end:
-            time.sleep(0.5)
-            try:
-                new = [f for f in self.sd_files() if f["url"] not in before]
-            except OSError:
-                pass
-
-        if not new:
-            response.success, response.message = False, "Photo taken but new file not found on SD card"
-        else:
-            path = os.path.join(self.save_dir, new[-1]["name"])
-            try:
-                urllib.request.urlretrieve(new[-1]["url"], path)
-                response.success, response.message = True, path
-            except OSError as e:
-                response.success, response.message = False, f"Download failed: {e}"
-
-        self.get_logger().info(response.message)
-        return response
-
-    def media_api(self, api, **params):
-        """Call the camera web server (port 82) and return its 'data' field."""
-        query = urllib.parse.urlencode(params)
-        url = f"http://{self.ip}:82//cgi-bin/media.cgi/api/v1/{api}?{query}"
-        with urllib.request.urlopen(url, timeout=3.0) as r:
-            return json.loads(r.read().decode()).get("data", {})
-
-    def sd_files(self):
-        """List photos in the newest folder on the SD card: [{'name', 'url'}, ...]"""
-        dirs = self.media_api("getdirectories", media_type=0).get("directories", [])
-        if not dirs:
-            return []
-        newest = max(dirs, key=lambda d: d["name"])["path"]
-        count = self.media_api("getmediacount", media_type=0, path=newest).get("count", 0)
-        files = self.media_api("getmedialist", media_type=0, path=newest, start=0, count=count)
-        return files.get("list", [])
-
 
 def main():
     rclpy.init()
