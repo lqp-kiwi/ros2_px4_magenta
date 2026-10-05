@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-    Takeoff and Land for PX4 using ROS2 with GPS.
+    Takeoff, take one SIYI onboard photo, and Land for PX4 using ROS2 with GPS.
     Author: Phuong Le
-    Lasted Updated: 2026-09-25
+    Lasted Updated: 2026-10-05
     Usage:
-	    ros2 run px4_control takeoff_land_mission
+        ros2 run siyi_camera take_photo
+        ros2 run px4_control takeoff_land_mission
 """
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from std_srvs.srv import Trigger
 from px4_msgs.msg import (
     VehicleCommand,
     VehicleStatus,
@@ -25,11 +27,12 @@ NAN = float('nan')
 # ---------------------------------------------------------------------------
 TARGET_SYSTEM = 10        # must match MAV_SYS_ID on the flight controller
 REQUIRE_GPS = True        # outdoor: wait for GPS/home like ensure_gps_estimate(); False indoors
-HOVER_TIME = 10.0         # s to hover after takeoff completes
+HOVER_TIME = 3.0          # s to hover after takeoff (drone settles) before the photo
 
 READY_TIMEOUT = 120.0     # s to wait for PX4 to be ready
 ARM_TIMEOUT = 10.0        # s to wait for ARMED
 TAKEOFF_TIMEOUT = 30.0    # s to wait for takeoff to finish (then land)
+PHOTO_TIMEOUT = 10.0      # s to wait for the photo (then land anyway)
 RESEND_PERIOD = 1.0       # s between command retries
 
 TOPIC_CMD = '/fmu/in/vehicle_command'
@@ -37,6 +40,7 @@ TOPIC_STATUS = '/fmu/out/vehicle_status'
 TOPIC_LPOS = '/fmu/out/vehicle_local_position'
 TOPIC_FAILSAFE = '/fmu/out/failsafe_flags'
 TOPIC_GPS = '/fmu/out/vehicle_gps_position'
+SRV_PHOTO = '/siyi/take_photo_onboard'
 
 
 def field(msg, name, default=None):
@@ -62,6 +66,10 @@ class TakeoffLandMission(Node):
         self.create_subscription(FailsafeFlags, TOPIC_FAILSAFE, self.failsafe_cb, qos)
         self.create_subscription(SensorGps, TOPIC_GPS, self.gps_cb, qos)
 
+        # SIYI camera service (from siyi_camera node)
+        self.photo_client = self.create_client(Trigger, SRV_PHOTO)
+        self.photo_future = None
+
         self.status = None
         self.lpos = None
         self.failsafe = None
@@ -76,6 +84,8 @@ class TakeoffLandMission(Node):
 
         self.timer = self.create_timer(0.1, self.loop)  # 10 Hz
         self.get_logger().info('Waiting for PX4 to be ready...')
+        if not self.photo_client.service_is_ready():
+            self.get_logger().warn(f'{SRV_PHOTO} not available yet - is "ros2 run siyi_camera take_photo" running?')
 
     # ------------------------------------------------------------------ utils
     def now(self):
@@ -188,7 +198,30 @@ class TakeoffLandMission(Node):
                 self.takeoff()
 
         elif self.state == 'HOVER':
+            # Let the drone settle at altitude so the photo is not blurry
             if self.elapsed() >= HOVER_TIME:
+                self.set_state('PHOTO')
+
+        elif self.state == 'PHOTO':
+            # Never block here: the drone must land even if the camera fails
+            if self.photo_future is None:
+                if self.photo_client.service_is_ready():
+                    self.photo_future = self.photo_client.call_async(Trigger.Request())
+                    self.get_logger().info('>>> Taking onboard photo...')
+                elif self.elapsed() > PHOTO_TIMEOUT:
+                    self.get_logger().error(f'{SRV_PHOTO} not available - landing without photo')
+                    self.set_state('LAND')
+                else:
+                    self.log_every(2.0, f'Waiting for {SRV_PHOTO}...', warn=True)
+            elif self.photo_future.done():
+                result = self.photo_future.result()
+                if result is not None and result.success:
+                    self.get_logger().info(f'Photo saved: {result.message}')
+                else:
+                    self.get_logger().error(f'Photo failed: {field(result, "message", "no response")}')
+                self.set_state('LAND')
+            elif self.elapsed() > PHOTO_TIMEOUT:
+                self.get_logger().error('Photo timeout - landing')
                 self.set_state('LAND')
 
         elif self.state == 'LAND':

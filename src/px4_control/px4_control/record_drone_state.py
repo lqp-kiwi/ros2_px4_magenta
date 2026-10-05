@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
 
-"""
-Script Name: record_drone_state.py
-Description: This script creates a .json file of the drone's current state,
-             saving the raw px4_msgs messages returned by the uXRCE-DDS agent
-
-Last Updated: 2026-10-03
-
-Usage:
-	ros2 run px4_control record_drone_state [filename]
-"""
-
 import sys
 import json
 import time
@@ -22,6 +11,17 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from rosidl_runtime_py.convert import message_to_ordereddict
 from px4_msgs.msg import VehicleGlobalPosition, VehicleLocalPosition, VehicleAttitude, VehicleStatus
+
+"""
+Script Name: record_drone_state.py
+Description: This script creates a .json file of the drone's current state,
+             saving the raw px4_msgs messages returned by the uXRCE-DDS agent
+
+Last Modified: 2026-10-03
+
+Usage:
+	ros2 run px4_control record_drone_state [filename]
+"""
 
 # Topics to record: name in the file -> (topic, message type)
 TOPICS = {
