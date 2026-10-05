@@ -16,7 +16,7 @@ setup(
     maintainer='kiwi',
     maintainer_email='lehuo10@rowan.edu',
     description='Control package for PX4',
-    license='ROWAN',
+    license='MIT',
     extras_require={
         'test': [
             'pytest',
@@ -25,9 +25,11 @@ setup(
     entry_points={
         'console_scripts': [
             'offboard_arm = px4_control.offboard_arm:main',
-            'takeoff_land_classic = px4_control.takeoff_land_classic:main',
+            'takeoff_land_indoor = px4_control.takeoff_land_indoor:main',
             'takeoff_land_mission = px4_control.takeoff_land_mission:main',
-            'record_drone_state = px4_control.record_drone_state:main',
+            'takeoff_land_takephoto_mission = px4_control.takeoff_land_takephoto_mission:main',
+            'record_drone_state   = px4_control.record_drone_state:main',
+            'fly_setpoints_mission = px4_control.fly_setpoints_mission:main',
         ],
     },
 )

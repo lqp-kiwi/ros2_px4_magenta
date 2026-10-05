@@ -5,7 +5,7 @@
   <version>0.0.1</version>
   <description>Control package for PX4</description>
   <maintainer email="lephuo10@rowan.edu">Phuong Le</maintainer>
-  <license>MIT</license>
+  <license>ROWAN</license>
 
   <depend>rclpy</depend>
   <depend>px4_msgs</depend>
