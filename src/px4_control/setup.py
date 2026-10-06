@@ -30,6 +30,8 @@ setup(
             'takeoff_land_takephoto_mission = px4_control.takeoff_land_takephoto_mission:main',
             'record_drone_state   = px4_control.record_drone_state:main',
             'fly_setpoints_mission = px4_control.fly_setpoints_mission:main',
+            'fly_setpoints_takephoto_mission = px4_control.fly_setpoints_takephoto_mission:main',
+            'obstacle_avoidance_static_indoor = px4_control.obstacle_avoidance_static_indoor:main',
         ],
     },
 )
