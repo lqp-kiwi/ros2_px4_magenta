@@ -24,7 +24,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'pointcloud = depth_camera.pointcloud:main'
+            'camera = depth_camera.camera:main',
+            'pointcloud = depth_camera.pointcloud:main',
+            'depth_grid = depth_camera.depth_grid:main'
         ],
     },
 )
