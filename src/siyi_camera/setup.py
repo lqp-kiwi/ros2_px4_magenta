@@ -24,9 +24,10 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'camera_node = siyi_camera.camera_node:main',
-            'gimbal_node = siyi_camera.gimbal_node:main',
-            'take_photo = siyi_camera.take_photo:main'
+            'take_photo = siyi_camera.take_photo:main',
+            'qr_detect = siyi_camera.qr_detect:main',
+            'qr_stream = siyi_camera.qr_stream:main',
+            'record_video = siyi_camera.record_video:main',
         ],
     },
 )
