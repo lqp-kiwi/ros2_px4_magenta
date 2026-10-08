@@ -32,6 +32,7 @@ setup(
             'fly_setpoints_mission = px4_control.fly_setpoints_mission:main',
             'fly_setpoints_takephoto_mission = px4_control.fly_setpoints_takephoto_mission:main',
             'obstacle_avoidance_static_indoor = px4_control.obstacle_avoidance_static_indoor:main',
+            'obstacle_avoidance_static_gps = px4_control.obstacle_avoidance_static_gps:main',
         ],
     },
 )
