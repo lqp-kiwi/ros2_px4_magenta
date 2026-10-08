@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 
 """
-    Takeoff -> Offboard hold -> dodge obstacles (keep altitude) for PX4 using ROS2 in door.
-    Obstacle data comes from depth_grid.py (topic /depth_grid, n x n mean distance in meters).
-    Author: Phuong Le
-    Lasted Updated: 2026-10-06
+    Takeoff -> Offboard hold -> dodge obstacles in 7 directions for PX4 using ROS2 in door.
+    Obstacle data comes from depth_grid.py (topic /depth_grid, n x n mean distance in meters, n >= 3).
+    Authors: Phuong Le (lephuo10@rowan.edu)
+    Lasted Updated: 2026-10-08
 
     Run (3 terminals):
         ros2 run depth_camera camera --no-cloud
@@ -12,12 +12,24 @@
         python3 takeoff_avoid_indoor.py
 
     Dodge rule (camera looks forward, image left = drone left):
-        - Use the middle rows of the grid (skip top = ceiling, bottom = floor)
-        - If any cell is closer than DANGER_DIST:
-            obstacle more on the left  -> move right
-            obstacle more on the right -> move left
-            both sides blocked         -> move back
-        - Altitude and yaw never change. Never go farther than MAX_OFFSET from the hold point.
+        The grid is cut into bands:
+                 +--------+----------+---------+
+                 |            top              |   -> is it free to go UP?
+                 +--------+----------+---------+
+                 |  left  |  center  |  right  |   -> where is the obstacle?
+                 +--------+----------+---------+
+                 |           bottom            |   -> is it free to go DOWN?
+                 +--------+----------+---------+
+        A band is "blocked" if any cell is closer than DANGER_DIST.
+            only left blocked                 -> RIGHT
+            only right blocked                -> LEFT
+            left + right blocked (center free)-> BACK
+            center blocked, both sides free   -> LEFT or RIGHT (the side with more space)
+            center + right blocked            -> BACK_LEFT
+            center + left blocked             -> BACK_RIGHT
+            left + center + right blocked     -> UP if top free, else DOWN if bottom free, else BACK
+        UP / DOWN only inside [MIN_ALT, MAX_ALT]. Yaw never changes.
+        Never go farther than MAX_OFFSET (horizontal) from the hold point.
 
     Stays in Offboard and keeps dodging forever, until you press Ctrl+C.
     Land first (QGC or PX4 console: commander land) before stopping the node.
@@ -37,35 +49,69 @@ from px4_msgs.msg import VehicleCommand, OffboardControlMode, TrajectorySetpoint
 from std_msgs.msg import Float32MultiArray
 
 TAKEOFF_ALT = 1.5     # meters (indoor: keep it low)
+MIN_ALT = 0.8         # meters, never dodge DOWN below this
+MAX_ALT = 2.0         # meters, never dodge UP above this (check your ceiling!)
 DANGER_DIST = 1.0     # meters, obstacle closer than this -> dodge
 DODGE_STEP = 0.5      # meters moved per dodge
 MAX_SPEED = 0.3       # m/s, the setpoint moves at most this fast (smooth, no jumps)
 MAX_OFFSET = 2.0      # meters, never move farther than this from the hold point (indoor geofence)
 GRID_TIMEOUT = 0.5    # seconds, /depth_grid older than this -> do not dodge, just hold
 
+# Dodge directions in body frame: (forward, right, up), length 1
+S = math.sqrt(0.5)
+DIRECTIONS = {
+    'left':       (0.0, -1.0, 0.0),
+    'right':      (0.0, 1.0, 0.0),
+    'back':       (-1.0, 0.0, 0.0),
+    'back_left':  (-S, -S, 0.0),
+    'back_right': (-S, S, 0.0),
+    'up':         (0.0, 0.0, 1.0),
+    'down':       (0.0, 0.0, -1.0),
+}
+
 # nav_state number -> name (e.g. 17 -> AUTO_TAKEOFF), read from the message definition
 NAV_STATE_NAMES = {getattr(VehicleStatus, n): n.replace('NAVIGATION_STATE_', '')
                    for n in dir(VehicleStatus) if n.startswith('NAVIGATION_STATE_') and n != 'NAVIGATION_STATE_MAX'}
 
 
-def choose_dodge(grid, danger_dist):
-    """Decide where to dodge from the n x n grid.
-    Returns (direction, closest) with direction in {None, 'left', 'right', 'back'}.
+def choose_dodge(grid, danger_dist, can_up=True, can_down=True):
+    """Decide where to dodge from the n x n grid (see the table at the top of the file).
+    Returns (direction, closest) with direction = None or a key of DIRECTIONS.
     NaN cells (no data) are ignored.
     """
-    rows = grid[1:-1] if grid.shape[0] >= 3 else grid      # skip ceiling / floor rows
-    rows = np.where(np.isnan(rows), np.inf, rows)
-    col_min = rows.min(axis=0)                             # closest distance in each column
-    closest = float(col_min.min())
+    g = np.where(np.isnan(grid), np.inf, grid)
+    if min(g.shape) < 3:                                   # too small to cut into bands
+        closest = float(g.min())
+        return ('back' if closest < danger_dist else None), closest
+
+    k, m = g.shape[0] // 3, g.shape[1] // 3                # band size (rows, columns)
+    top, bottom = float(g[:k].min()), float(g[-k:].min())
+    mid = g[k:-k]                                          # middle rows
+    left, center, right = float(mid[:, :m].min()), float(mid[:, m:-m].min()), float(mid[:, -m:].min())
+
+    closest = min(left, center, right)
     if closest >= danger_dist:
         return None, closest
+    free_l, free_c, free_r = left >= danger_dist, center >= danger_dist, right >= danger_dist
 
-    half = len(col_min) // 2
-    left_free = float(col_min[:half].min())                # worst cell on the left half
-    right_free = float(col_min[len(col_min) - half:].min())  # worst cell on the right half
-    if max(left_free, right_free) < danger_dist:
+    if free_c:                                             # obstacle only at the side(s)
+        if free_l:
+            return 'left', closest
+        if free_r:
+            return 'right', closest
         return 'back', closest
-    return ('left' if left_free > right_free else 'right'), closest
+    # obstacle in front
+    if free_l and free_r:
+        return ('left' if left > right else 'right'), closest
+    if free_l:
+        return 'back_left', closest
+    if free_r:
+        return 'back_right', closest
+    if can_up and top >= danger_dist:
+        return 'up', closest
+    if can_down and bottom >= danger_dist:
+        return 'down', closest
+    return 'back', closest
 
 
 class TakeoffAvoidNode(Node):
@@ -113,11 +159,10 @@ class TakeoffAvoidNode(Node):
         self.dt = 0.1
         self.offboard_timer = self.create_timer(self.dt, self.offboard_timer_callback)
 
-        # Setpoint state (local NED). None = not streaming yet
+        # Setpoint state (local NED x, y, z). None = not streaming yet
         self.home_xy = None       # hold point after takeoff (geofence center)
-        self.sp_xy = None         # setpoint sent to PX4 right now
-        self.target_xy = None     # where the setpoint is moving to
-        self.hold_z = None        # altitude, never changes
+        self.sp = None            # setpoint sent to PX4 right now
+        self.target = None        # where the setpoint is moving to
         self.hold_yaw = None      # heading, never changes
         self.avoid_enabled = False
 
@@ -192,13 +237,13 @@ class TakeoffAvoidNode(Node):
         self.get_logger().info(f"[t={self.seconds_passed:3d}s] {st} | {lp}")
 
     def offboard_timer_callback(self):
-        if self.sp_xy is None:
+        if self.sp is None:
             return
         if self.avoid_enabled:
             self.avoid_step()
         self.move_setpoint_toward_target()
         self.publish_offboard_control_mode()
-        self.publish_trajectory_setpoint(self.sp_xy[0], self.sp_xy[1], self.hold_z, self.hold_yaw)
+        self.publish_trajectory_setpoint(self.sp[0], self.sp[1], self.sp[2], self.hold_yaw)
 
     def avoid_step(self):
         # Pilot / QGC / failsafe switched away from Offboard -> do not move the setpoint
@@ -212,18 +257,22 @@ class TakeoffAvoidNode(Node):
                                    throttle_duration_sec=2.0)
             return
         # Wait until the previous dodge is finished before choosing a new one
-        if math.dist(self.sp_xy, self.target_xy) > 0.05:
+        if math.dist(self.sp, self.target) > 0.05:
             return
 
-        direction, closest = choose_dodge(self.grid, DANGER_DIST)
+        alt = -self.target[2]                              # indoor: ground is z = 0
+        direction, closest = choose_dodge(self.grid, DANGER_DIST,
+                                          can_up=alt + DODGE_STEP <= MAX_ALT + 1e-3,
+                                          can_down=alt - DODGE_STEP >= MIN_ALT - 1e-3)
         if direction is None:
             return
 
-        # Body frame (forward, right) -> local NED (north, east) using the hold heading
-        fwd, right = {'left': (0.0, -DODGE_STEP), 'right': (0.0, DODGE_STEP), 'back': (-DODGE_STEP, 0.0)}[direction]
+        # Body frame (forward, right, up) -> local NED (north, east, down) using the hold heading
+        fwd, right, up = (DODGE_STEP * v for v in DIRECTIONS[direction])
         c, s = math.cos(self.hold_yaw), math.sin(self.hold_yaw)
-        new_x = self.target_xy[0] + fwd * c - right * s
-        new_y = self.target_xy[1] + fwd * s + right * c
+        new_x = self.target[0] + fwd * c - right * s
+        new_y = self.target[1] + fwd * s + right * c
+        new_z = self.target[2] - up                        # NED: up = negative z
 
         # Indoor geofence: stay within MAX_OFFSET of the hold point
         dx, dy = new_x - self.home_xy[0], new_y - self.home_xy[1]
@@ -231,23 +280,22 @@ class TakeoffAvoidNode(Node):
         if dist > MAX_OFFSET:
             new_x = self.home_xy[0] + dx * MAX_OFFSET / dist
             new_y = self.home_xy[1] + dy * MAX_OFFSET / dist
-        if math.dist((new_x, new_y), self.target_xy) < 0.05:
+        if math.dist((new_x, new_y, new_z), self.target) < 0.05:
             self.get_logger().warn(f">>> Obstacle {closest:.2f} m but geofence limit reached - holding <<<",
                                    throttle_duration_sec=2.0)
             return
 
-        self.target_xy = (new_x, new_y)
-        self.get_logger().info(f">>> Obstacle {closest:.2f} m -> dodge {direction.upper()} <<<")
+        self.target = (new_x, new_y, new_z)
+        self.get_logger().info(f">>> Obstacle {closest:.2f} m -> dodge {direction.upper()} (alt {-new_z:.1f} m) <<<")
 
     def move_setpoint_toward_target(self):
-        dx = self.target_xy[0] - self.sp_xy[0]
-        dy = self.target_xy[1] - self.sp_xy[1]
-        dist = math.hypot(dx, dy)
+        d = [t - p for t, p in zip(self.target, self.sp)]
+        dist = math.hypot(*d)
         max_step = MAX_SPEED * self.dt
         if dist <= max_step:
-            self.sp_xy = self.target_xy
+            self.sp = self.target
         else:
-            self.sp_xy = (self.sp_xy[0] + dx * max_step / dist, self.sp_xy[1] + dy * max_step / dist)
+            self.sp = tuple(p + v * max_step / dist for p, v in zip(self.sp, d))
 
     def arm(self):
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
@@ -264,9 +312,8 @@ class TakeoffAvoidNode(Node):
             return
         # Hold at current x, y, heading. z = -TAKEOFF_ALT (NED: negative = up)
         self.home_xy = (self.local_pos.x, self.local_pos.y)
-        self.sp_xy = self.home_xy
-        self.target_xy = self.home_xy
-        self.hold_z = -TAKEOFF_ALT
+        self.sp = (self.local_pos.x, self.local_pos.y, -TAKEOFF_ALT)
+        self.target = self.sp
         self.hold_yaw = self.local_pos.heading
         self.get_logger().info(
             f">>> Start streaming hold setpoint x={self.local_pos.x:.2f} y={self.local_pos.y:.2f} alt={TAKEOFF_ALT}m <<<")
