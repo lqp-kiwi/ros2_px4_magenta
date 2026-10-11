@@ -1,461 +1,408 @@
 #!/usr/bin/env python3
 
-"""
-    Takeoff -> Offboard hold -> dodge obstacles in 7 directions for PX4 using ROS2, OUTDOOR with GPS.
-    Obstacle data comes from depth_grid.py (topic /depth_grid, n x n mean distance in meters, n >= 3).
-    Authors: Phuong Le (lephuo10@rowan.edu)
-    Lasted Updated: 2026-10-08
-
-    Run (3 terminals):
-        ros2 run depth_camera camera --no-cloud
-        ros2 run depth_camera depth_grid
-        python3 takeoff_avoid_gps.py
-
-    GPS part:
-        - Waits for a good GPS fix (3D fix, >= MIN_SATS satellites, local position valid) before ARM.
-        - TAKEOFF uses GPS altitude: param7 = ground altitude AMSL + TAKEOFF_ALT,
-          lat/lon = NaN (= take off right here).
-        - Hold point (home) is saved in GPS (lat, lon). Status line shows lat, lon and distance to home.
-        - Each dodge prints the target as GPS (lat, lon) and altitude above the ground.
-        - GPS fix lost -> do not dodge, just hold.
-        Setpoints are still sent in local NED: PX4 EKF already fuses GPS into local position.
-
-    Dodge rule (camera looks forward, image left = drone left):
-        The grid is cut into bands:
-                 +--------+----------+---------+
-                 |            top              |   -> is it free to go UP?
-                 +--------+----------+---------+
-                 |  left  |  center  |  right  |   -> where is the obstacle?
-                 +--------+----------+---------+
-                 |           bottom            |   -> is it free to go DOWN?
-                 +--------+----------+---------+
-        A band is "blocked" if any cell is closer than DANGER_DIST.
-            only left blocked                 -> RIGHT
-            only right blocked                -> LEFT
-            left + right blocked (center free)-> BACK
-            center blocked, both sides free   -> LEFT or RIGHT (the side with more space)
-            center + right blocked            -> BACK_LEFT
-            center + left blocked             -> BACK_RIGHT
-            left + center + right blocked     -> UP if top free, else DOWN if bottom free, else BACK
-        UP / DOWN only inside [MIN_ALT, MAX_ALT] above the ground. Yaw never changes.
-        Never go farther than MAX_OFFSET (horizontal) from the hold point.
-
-    Stays in Offboard and keeps dodging forever, until you press Ctrl+C.
-    Land first (QGC or PX4 console: commander land) before stopping the node.
-
-    Status line (sys_id, armed, mode, local position, GPS) is printed every second for the first
-    20 s, then every 5 s, so you can see at which step it stops.
-"""
-
+import sys
+import json
 import math
 import time
+import threading
 
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-from px4_msgs.msg import (VehicleCommand, OffboardControlMode, TrajectorySetpoint, VehicleLocalPosition,
-                          VehicleStatus, VehicleGlobalPosition, SensorGps)
-from std_msgs.msg import Float32MultiArray
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy, qos_profile_sensor_data
+from rclpy.signals import SignalHandlerOptions
+from sensor_msgs.msg import Image, CameraInfo
+from px4_msgs.msg import (VehicleGlobalPosition, VehicleLocalPosition, VehicleAttitude, VehicleStatus,
+                          OffboardControlMode, TrajectorySetpoint, VehicleCommand)
 
-TAKEOFF_ALT = 3.0     # meters above the ground
-MIN_ALT = 2.0         # meters above the ground, never dodge DOWN below this
-MAX_ALT = 6.0         # meters above the ground, never dodge UP above this
-DANGER_DIST = 1.5     # meters, obstacle closer than this -> dodge
-DODGE_STEP = 1.0      # meters moved per dodge
-MAX_SPEED = 0.5       # m/s, the setpoint moves at most this fast (smooth, no jumps)
-MAX_OFFSET = 5.0      # meters, never move farther than this from the hold point (geofence)
-GRID_TIMEOUT = 0.5    # seconds, /depth_grid older than this -> do not dodge, just hold
-MIN_SATS = 8          # GPS satellites needed before ARM
-EARTH_R = 6378137.0   # meters
+from px4_control.vfh3d import VFH3D
 
-# Dodge directions in body frame: (forward, right, up), length 1
-S = math.sqrt(0.5)
-DIRECTIONS = {
-    'left':       (0.0, -1.0, 0.0),
-    'right':      (0.0, 1.0, 0.0),
-    'back':       (-1.0, 0.0, 0.0),
-    'back_left':  (-S, -S, 0.0),
-    'back_right': (-S, S, 0.0),
-    'up':         (0.0, 0.0, 1.0),
-    'down':       (0.0, 0.0, -1.0),
+"""
+Script Name: go_to_gps_point.py
+Description: Takes off, flies to the GPS point saved in a .json file by record_drone_state.py
+             and lands there. Obstacles seen by the depth camera are avoided with 3DVFH+ (vfh3d.py).
+             The camera node (depth_camera package) must already be running.
+
+Last Modified: 2026-10-10
+
+Usage:
+    ros2 run px4_control obstacle_avoidance_static_gps [filename]
+"""
+
+# PX4 topics to read: name -> (topic, message type)
+TOPICS = {
+    "global_position": ("/fmu/out/vehicle_global_position", VehicleGlobalPosition),
+    "local_position": ("/fmu/out/vehicle_local_position", VehicleLocalPosition),
+    "attitude": ("/fmu/out/vehicle_attitude", VehicleAttitude),
+    "status": ("/fmu/out/vehicle_status", VehicleStatus),
 }
+DEPTH_TOPIC = "/camera/depth/image_raw"
+CAMERA_INFO_TOPIC = "/camera/depth/camera_info"
 
-# nav_state number -> name (e.g. 17 -> AUTO_TAKEOFF), read from the message definition
-NAV_STATE_NAMES = {getattr(VehicleStatus, n): n.replace('NAVIGATION_STATE_', '')
-                   for n in dir(VehicleStatus) if n.startswith('NAVIGATION_STATE_') and n != 'NAVIGATION_STATE_MAX'}
+MAX_EPH = 3.0             # max horizontal position error (m) before flying is allowed
 
+# Flight
+FLIGHT_ALT = 3.0          # flight altitude above the take-off point (m)
+USE_GOAL_ALT = False      # True: fly at the altitude saved in the .json instead of FLIGHT_ALT
+MIN_ALT = 1.5             # altitude band (above take-off point) allowed while avoiding (m)
+MAX_ALT = 8.0
+ACCEPT_RADIUS = 1.5       # goal reached when closer than this horizontally (m)
+MAX_SPEED = 1.0           # (m/s)
+SLOW_DOWN_DIST = 5.0      # start slowing down this far from the goal (m)
+YAW_LOCK_DIST = 2.0       # closer than this to the goal: stop turning towards the flight direction (m)
+MAX_HEADING_ERR = math.radians(35)  # only move when the camera looks within this angle of the flight direction
+YAW_SCAN_RATE = math.radians(20)    # turn speed when every direction is blocked (rad/s)
+PLAN_RATE = 10.0          # 3DVFH+ steps per second
+SETPOINT_RATE = 20.0      # offboard setpoints per second (PX4 needs > 2 Hz)
 
-def gps_dist(a, b):
-    """Distance in meters between two (lat, lon) points. Flat earth, fine for < 1 km."""
-    dn = math.radians(b[0] - a[0]) * EARTH_R
-    de = math.radians(b[1] - a[1]) * EARTH_R * math.cos(math.radians(a[0]))
-    return math.hypot(dn, de)
+# Depth camera
+DEPTH_STRIDE = 8          # use every 8th pixel
+DEPTH_MIN = 0.3           # (m)
+DEPTH_MAX = 8.0           # (m)
+DEPTH_TIMEOUT = 0.5       # hold position if no depth image for this long (s)
+CAM_OFFSET = np.array([0.10, 0.0, 0.0])  # camera position in body FRD (m); camera faces forward, level
+GROUND_IGNORE = 0.5       # ignore points lower than this above the take-off ground (m)
 
+EARTH_RADIUS = 6371000.0
 
-def offset_to_gps(home, north, east):
-    """(lat, lon) of a point north/east meters away from home (lat, lon)."""
-    lat = home[0] + math.degrees(north / EARTH_R)
-    lon = home[1] + math.degrees(east / (EARTH_R * math.cos(math.radians(home[0]))))
-    return lat, lon
-
-
-def choose_dodge(grid, danger_dist, can_up=True, can_down=True):
-    """Decide where to dodge from the n x n grid (see the table at the top of the file).
-    Returns (direction, closest) with direction = None or a key of DIRECTIONS.
-    NaN cells (no data, e.g. sky) are ignored.
-    """
-    g = np.where(np.isnan(grid), np.inf, grid)
-    if min(g.shape) < 3:                                   # too small to cut into bands
-        closest = float(g.min())
-        return ('back' if closest < danger_dist else None), closest
-
-    k, m = g.shape[0] // 3, g.shape[1] // 3                # band size (rows, columns)
-    top, bottom = float(g[:k].min()), float(g[-k:].min())
-    mid = g[k:-k]                                          # middle rows
-    left, center, right = float(mid[:, :m].min()), float(mid[:, m:-m].min()), float(mid[:, -m:].min())
-
-    closest = min(left, center, right)
-    if closest >= danger_dist:
-        return None, closest
-    free_l, free_c, free_r = left >= danger_dist, center >= danger_dist, right >= danger_dist
-
-    if free_c:                                             # obstacle only at the side(s)
-        if free_l:
-            return 'left', closest
-        if free_r:
-            return 'right', closest
-        return 'back', closest
-    # obstacle in front
-    if free_l and free_r:
-        return ('left' if left > right else 'right'), closest
-    if free_l:
-        return 'back_left', closest
-    if free_r:
-        return 'back_right', closest
-    if can_up and top >= danger_dist:
-        return 'up', closest
-    if can_down and bottom >= danger_dist:
-        return 'down', closest
-    return 'back', closest
+filename = ""
 
 
-class TakeoffAvoidGpsNode(Node):
+def filename_valid(filename: str) -> bool:
+    dot_index = filename.find(".")
+    return dot_index == -1 or filename[dot_index:] == ".json"
+
+
+def load_goal(filename):
+    """Read the (only) recorded state and return its GPS point"""
+    with open(filename) as f:
+        states = json.load(f)
+    if len(states) != 1:
+        print(f"Warning: {len(states)} states in {filename}, using the first one")
+    gp = states[0]["global_position"]
+    return gp["lat"], gp["lon"], gp["alt"]
+
+
+def gps_to_ned(lat, lon, ref_lat, ref_lon):
+    """GPS -> local North/East (m), same azimuthal equidistant projection as PX4"""
+    lat, lon, ref_lat, ref_lon = map(math.radians, (lat, lon, ref_lat, ref_lon))
+    cos_d_lon = math.cos(lon - ref_lon)
+    arg = math.sin(ref_lat) * math.sin(lat) + math.cos(ref_lat) * math.cos(lat) * cos_d_lon
+    c = math.acos(max(-1.0, min(1.0, arg)))
+    k = 1.0 if abs(c) < 1e-9 else c / math.sin(c)
+    north = k * (math.cos(ref_lat) * math.sin(lat) - math.sin(ref_lat) * math.cos(lat) * cos_d_lon) * EARTH_RADIUS
+    east = k * math.cos(lat) * math.sin(lon - ref_lon) * EARTH_RADIUS
+    return north, east
+
+
+def quat_to_rot(q):
+    """PX4 quaternion [w, x, y, z] (body FRD -> NED) -> rotation matrix"""
+    w, x, y, z = q
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+    ])
+
+
+def depth_to_meters(msg):
+    """Depth image -> 2D numpy array in meters (16UC1/mono16 = mm, 32FC1 = m)"""
+    if msg.encoding in ("16UC1", "mono16"):
+        dtype = ">u2" if msg.is_bigendian else "<u2"
+        img = np.frombuffer(msg.data, dtype=dtype).reshape(msg.height, msg.step // 2)[:, :msg.width]
+        return img.astype(np.float32) / 1000.0
+    if msg.encoding == "32FC1":
+        dtype = ">f4" if msg.is_bigendian else "<f4"
+        return np.frombuffer(msg.data, dtype=dtype).reshape(msg.height, msg.step // 4)[:, :msg.width]
+    raise ValueError(f"Unsupported depth encoding: {msg.encoding}")
+
+
+def wrap_pi(angle):
+    return (angle + math.pi) % (2 * math.pi) - math.pi
+
+
+class GoToGPSPoint(Node):
     def __init__(self):
-        super().__init__('takeoff_avoid_gps_node')
-
-        # Config QoS for PX4
-        qos_profile = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1
-        )
-
-        self.vehicle_command_pub = self.create_publisher(
-            VehicleCommand, '/fmu/in/vehicle_command', qos_profile)
-        self.offboard_mode_pub = self.create_publisher(
-            OffboardControlMode, '/fmu/in/offboard_control_mode', qos_profile)
-        self.setpoint_pub = self.create_publisher(
-            TrajectorySetpoint, '/fmu/in/trajectory_setpoint', qos_profile)
-
-        # Local position (x, y, z in NED) - with GPS fused by the EKF
-        self.local_pos = None
-        self.create_subscription(
-            VehicleLocalPosition, '/fmu/out/vehicle_local_position',
-            self.local_pos_callback, qos_profile)
-
-        # GPS: global position (lat, lon, alt AMSL) and raw receiver (fix type, satellites)
-        self.global_pos = None
-        self.gps = None
-        self.create_subscription(
-            VehicleGlobalPosition, '/fmu/out/vehicle_global_position',
-            self.global_pos_callback, qos_profile)
-        self.create_subscription(
-            SensorGps, '/fmu/out/vehicle_gps_position', self.gps_callback, qos_profile)
-
-        # Vehicle status (armed, mode, system_id).
+        super().__init__("go_to_gps_point")
+        self.latest = {}    # newest message of each topic
+        self.stamp = {}     # time each topic was last received
+        # PX4 publishes best-effort, so the subscriber QoS must match
+        qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+                         durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                         history=HistoryPolicy.KEEP_LAST, depth=1)
+        for name, (topic, msg_type) in TOPICS.items():
+            self.create_subscription(msg_type, topic, lambda msg, name=name: self.save_msg(name, msg), qos)
         # PX4 v1.16+ names it vehicle_status_v1, older versions vehicle_status
-        self.status = None
-        for topic in ('/fmu/out/vehicle_status', '/fmu/out/vehicle_status_v1'):
-            self.create_subscription(VehicleStatus, topic, self.status_callback, qos_profile)
+        self.create_subscription(VehicleStatus, "/fmu/out/vehicle_status_v1",
+                                 lambda msg: self.save_msg("status", msg), qos)
+        self.create_subscription(Image, DEPTH_TOPIC, lambda msg: self.save_msg("depth", msg),
+                                 qos_profile_sensor_data)
+        self.create_subscription(CameraInfo, CAMERA_INFO_TOPIC, lambda msg: self.save_msg("camera_info", msg),
+                                 qos_profile_sensor_data)
 
-        # Obstacle grid from depth_grid.py
-        self.grid = None
-        self.grid_time = 0.0
-        self.create_subscription(Float32MultiArray, '/depth_grid', self.grid_callback, 10)
+        self.offboard_pub = self.create_publisher(OffboardControlMode, "/fmu/in/offboard_control_mode", qos)
+        self.setpoint_pub = self.create_publisher(TrajectorySetpoint, "/fmu/in/trajectory_setpoint", qos)
+        self.command_pub = self.create_publisher(VehicleCommand, "/fmu/in/vehicle_command", qos)
 
-        # Timer for commands (duration 1 second) - same as before
-        self.timer = self.create_timer(1.0, self.timer_callback)
-        self.seconds_passed = 0   # stays 0 until GPS is good
-        self.wait_time = 0
-        self.target_system = 10
+        # Current setpoint, streamed by the timer (None = stream nothing)
+        self.setpoint = None
+        self.create_timer(1.0 / SETPOINT_RATE, self.publish_setpoint)
 
-        # Timer for Offboard stream + avoidance (10 Hz)
-        self.dt = 0.1
-        self.offboard_timer = self.create_timer(self.dt, self.offboard_timer_callback)
+        self.vfh = VFH3D()
+        self.start_z = 0.0      # local z of the take-off point
+        self.prev_dir = None    # last direction flown (3DVFH+ smoothing)
+        self.hold_pos = None    # set while holding because no path / no camera
+        self.hold_yaw = 0.0
+        self.rays = None        # pixel rays (body FRD) for the depth image
 
-        # Setpoint state (local NED x, y, z). None = not streaming yet
-        self.ground_z = None      # local z on the ground (saved at takeoff)
-        self.home_xy = None       # hold point after takeoff (geofence center)
-        self.home_gps = None      # hold point as (lat, lon)
-        self.sp = None            # setpoint sent to PX4 right now
-        self.target = None        # where the setpoint is moving to
-        self.hold_yaw = None      # heading, never changes
-        self.avoid_enabled = False
+    def save_msg(self, name, msg):
+        self.latest[name] = msg
+        self.stamp[name] = time.monotonic()
 
-    def local_pos_callback(self, msg):
-        self.local_pos = msg
-
-    def global_pos_callback(self, msg):
-        self.global_pos = msg
-
-    def gps_callback(self, msg):
-        self.gps = msg
-
-    def status_callback(self, msg):
-        self.status = msg
+    # ---------- state ----------
+    def data_ready(self):
+        if any(n not in self.latest for n in list(TOPICS) + ["depth", "camera_info"]):
+            return False
+        gp, lp = self.latest["global_position"], self.latest["local_position"]
+        return gp.eph < MAX_EPH and not gp.dead_reckoning and lp.xy_valid and lp.z_valid and lp.xy_global
 
     def is_armed(self):
-        return self.status is not None and self.status.arming_state == VehicleStatus.ARMING_STATE_ARMED
+        return self.latest["status"].arming_state == VehicleStatus.ARMING_STATE_ARMED
 
-    def is_offboard(self):
-        return self.status is not None and self.status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD
+    def in_offboard(self):
+        return self.latest["status"].nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD
 
-    def gps_ok(self):
-        return (self.gps is not None and self.gps.fix_type >= 3 and self.gps.satellites_used >= MIN_SATS
-                and self.global_pos is not None and self.local_pos is not None and self.local_pos.xy_valid)
+    def position(self):
+        lp = self.latest["local_position"]
+        return np.array([lp.x, lp.y, lp.z]), lp.heading
 
-    def grid_callback(self, msg):
-        n = msg.layout.dim[1].size if len(msg.layout.dim) >= 2 else int(round(math.sqrt(len(msg.data))))
-        self.grid = np.array(msg.data, dtype=float).reshape(-1, n)
-        self.grid_time = time.monotonic()
+    # ---------- commands ----------
+    def timestamp(self):
+        return int(self.get_clock().now().nanoseconds / 1000)
 
-    def timer_callback(self):
-        # Wait for a good GPS fix before starting the sequence
-        if self.seconds_passed == 0 and not self.gps_ok():
-            self.wait_time += 1
-            if self.wait_time % 2 == 1:
-                self.print_status()
-                self.get_logger().warn(f">>> Waiting for GPS (3D fix, >= {MIN_SATS} satellites) before ARM <<<")
+    def publish_setpoint(self):
+        sp = self.setpoint
+        if sp is None:
             return
+        mode = OffboardControlMode()
+        mode.timestamp = self.timestamp()
+        mode.position = sp["position"] is not None
+        mode.velocity = sp["position"] is None
+        self.offboard_pub.publish(mode)
 
-        self.seconds_passed += 1
-        if self.seconds_passed <= 20 or self.seconds_passed % 5 == 0:
-            self.print_status()
-
-        if self.seconds_passed == 1:
-            self.check_target_system()
-            self.arm()
-        elif self.seconds_passed == 3 and self.status is not None and not self.is_armed():
-            # First ARM may be lost if the DDS link was not ready yet -> send again
-            self.get_logger().warn(">>> Not armed after 2 s, sending ARM again <<<")
-            self.arm()
-        elif self.seconds_passed == 5:
-            self.takeoff(altitude=TAKEOFF_ALT)
-        elif self.seconds_passed == 13:
-            # Takeoff should be done by now: start streaming the hold setpoint
-            self.start_hold()
-        elif self.seconds_passed in (15, 17, 19) and not self.avoid_enabled:
-            # After 2 seconds of streaming, switch to Offboard (retry twice if PX4 did not switch)
-            self.set_offboard_mode()
-
-        # Turn avoidance on once PX4 is really in Offboard. Stays on until Ctrl+C.
-        if self.seconds_passed >= 15 and not self.avoid_enabled and self.is_offboard():
-            self.avoid_enabled = True
-            self.get_logger().info(">>> In OFFBOARD - obstacle avoidance ON (Ctrl+C to stop) <<<")
-        elif self.seconds_passed == 20 and not self.avoid_enabled:
-            self.get_logger().error(">>> PX4 did not enter OFFBOARD - check the status lines above <<<")
-
-    def check_target_system(self):
-        if self.status is None:
-            self.get_logger().error(
-                ">>> No vehicle_status from PX4! Is MicroXRCEAgent running? Check: ros2 topic list | grep fmu <<<")
-            return
-        if self.status.system_id != self.target_system:
-            self.get_logger().error(
-                f">>> PX4 system_id = {self.status.system_id} but target_system = {self.target_system}. "
-                f"PX4 ignores these commands! Using {self.status.system_id} instead <<<")
-            self.target_system = self.status.system_id
-
-    def print_status(self):
-        if self.status is None:
-            st = "status: (none)"
-        else:
-            armed = "ARMED" if self.is_armed() else "DISARMED"
-            mode = NAV_STATE_NAMES.get(self.status.nav_state, str(self.status.nav_state))
-            st = f"sys_id={self.status.system_id} {armed} mode={mode}"
-        if self.local_pos is None:
-            lp = "local_pos: (none)"
-        else:
-            lp = (f"xy_valid={self.local_pos.xy_valid} "
-                  f"x={self.local_pos.x:.2f} y={self.local_pos.y:.2f} z={self.local_pos.z:.2f}")
-        if self.gps is None:
-            gp = "gps: (none) - check vehicle_gps_position in dds_topics.yaml"
-        else:
-            gp = f"fix={self.gps.fix_type} sats={self.gps.satellites_used}"
-            if self.global_pos is not None:
-                here = (self.global_pos.lat, self.global_pos.lon)
-                gp += f" lat={here[0]:.7f} lon={here[1]:.7f}"
-                if self.home_gps is not None:
-                    gp += f" home_dist={gps_dist(self.home_gps, here):.1f} m"
-        self.get_logger().info(f"[t={self.seconds_passed:3d}s] {st} | {lp} | {gp}")
-
-    def offboard_timer_callback(self):
-        if self.sp is None:
-            return
-        if self.avoid_enabled:
-            self.avoid_step()
-        self.move_setpoint_toward_target()
-        self.publish_offboard_control_mode()
-        self.publish_trajectory_setpoint(self.sp[0], self.sp[1], self.sp[2], self.hold_yaw)
-
-    def avoid_step(self):
-        # Pilot / QGC / failsafe switched away from Offboard -> do not move the setpoint
-        if not self.is_offboard():
-            self.get_logger().warn(">>> Not in OFFBOARD (pilot or failsafe took over) - avoidance paused <<<",
-                                   throttle_duration_sec=5.0)
-            return
-        # GPS lost -> position may drift, do not dodge
-        if not self.gps_ok():
-            self.get_logger().warn(">>> GPS fix lost - holding (no dodge) <<<", throttle_duration_sec=2.0)
-            return
-        # No fresh obstacle data -> do not move, just hold
-        if self.grid is None or time.monotonic() - self.grid_time > GRID_TIMEOUT:
-            self.get_logger().warn(">>> No fresh /depth_grid - holding. Is depth_grid running? <<<",
-                                   throttle_duration_sec=2.0)
-            return
-        # Wait until the previous dodge is finished before choosing a new one
-        if math.dist(self.sp, self.target) > 0.05:
-            return
-
-        alt = self.ground_z - self.target[2]               # altitude above the ground
-        direction, closest = choose_dodge(self.grid, DANGER_DIST,
-                                          can_up=alt + DODGE_STEP <= MAX_ALT + 1e-3,
-                                          can_down=alt - DODGE_STEP >= MIN_ALT - 1e-3)
-        if direction is None:
-            return
-
-        # Body frame (forward, right, up) -> local NED (north, east, down) using the hold heading
-        fwd, right, up = (DODGE_STEP * v for v in DIRECTIONS[direction])
-        c, s = math.cos(self.hold_yaw), math.sin(self.hold_yaw)
-        new_x = self.target[0] + fwd * c - right * s
-        new_y = self.target[1] + fwd * s + right * c
-        new_z = self.target[2] - up                        # NED: up = negative z
-
-        # Geofence: stay within MAX_OFFSET of the hold point
-        dx, dy = new_x - self.home_xy[0], new_y - self.home_xy[1]
-        dist = math.hypot(dx, dy)
-        if dist > MAX_OFFSET:
-            new_x = self.home_xy[0] + dx * MAX_OFFSET / dist
-            new_y = self.home_xy[1] + dy * MAX_OFFSET / dist
-        if math.dist((new_x, new_y, new_z), self.target) < 0.05:
-            self.get_logger().warn(f">>> Obstacle {closest:.2f} m but geofence limit reached - holding <<<",
-                                   throttle_duration_sec=2.0)
-            return
-
-        self.target = (new_x, new_y, new_z)
-        lat, lon = offset_to_gps(self.home_gps, new_x - self.home_xy[0], new_y - self.home_xy[1])
-        self.get_logger().info(
-            f">>> Obstacle {closest:.2f} m -> dodge {direction.upper()} "
-            f"(target lat={lat:.7f} lon={lon:.7f} alt={self.ground_z - new_z:.1f} m) <<<")
-
-    def move_setpoint_toward_target(self):
-        d = [t - p for t, p in zip(self.target, self.sp)]
-        dist = math.hypot(*d)
-        max_step = MAX_SPEED * self.dt
-        if dist <= max_step:
-            self.sp = self.target
-        else:
-            self.sp = tuple(p + v * max_step / dist for p, v in zip(self.sp, d))
-
-    def arm(self):
-        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
-        self.get_logger().info(f">>> Sent ARM to Vehicle {self.target_system} <<<")
-
-    def takeoff(self, altitude=3.0):
-        if self.global_pos is None or self.local_pos is None:
-            self.get_logger().error(">>> No GPS / local position - TAKEOFF not sent <<<")
-            return
-        # With GPS, param7 is altitude AMSL (above sea level) -> ground altitude + altitude.
-        # param5/param6 (lat/lon) = NaN -> take off right here (0.0 would mean lat 0, lon 0!)
-        amsl = self.global_pos.alt + altitude
-        self.ground_z = self.local_pos.z
-        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_TAKEOFF,
-                                     param4=math.nan, param5=math.nan, param6=math.nan, param7=float(amsl))
-        self.get_logger().info(
-            f">>> Sent TAKEOFF command ({altitude}m above ground = {amsl:.1f}m AMSL) to Vehicle {self.target_system} <<<")
-
-    def start_hold(self):
-        if self.local_pos is None or self.global_pos is None:
-            self.get_logger().error(">>> No vehicle_local_position / vehicle_global_position received! <<<")
-            return
-        if self.ground_z is None:
-            self.ground_z = 0.0
-        # Hold at current x, y, heading, TAKEOFF_ALT above the ground (NED: negative = up)
-        self.home_xy = (self.local_pos.x, self.local_pos.y)
-        self.home_gps = (self.global_pos.lat, self.global_pos.lon)
-        self.sp = (self.local_pos.x, self.local_pos.y, self.ground_z - TAKEOFF_ALT)
-        self.target = self.sp
-        self.hold_yaw = self.local_pos.heading
-        self.get_logger().info(
-            f">>> Start streaming hold setpoint lat={self.home_gps[0]:.7f} lon={self.home_gps[1]:.7f} "
-            f"alt={TAKEOFF_ALT}m <<<")
-
-    def set_offboard_mode(self):
-        # param1 = 1 (custom mode), param2 = 6 (PX4 OFFBOARD mode)
-        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0)
-        self.get_logger().info(f">>> Sent OFFBOARD mode to Vehicle {self.target_system} <<<")
-
-    def publish_offboard_control_mode(self):
-        msg = OffboardControlMode()
-        msg.position = True     # control by position setpoint
-        msg.velocity = False
-        msg.acceleration = False
-        msg.attitude = False
-        msg.body_rate = False
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        self.offboard_mode_pub.publish(msg)
-
-    def publish_trajectory_setpoint(self, x, y, z, yaw):
+        nan3 = [math.nan] * 3
         msg = TrajectorySetpoint()
-        msg.position = [float(x), float(y), float(z)]
-        msg.velocity = [math.nan, math.nan, math.nan]
-        msg.acceleration = [math.nan, math.nan, math.nan]
-        msg.yaw = float(yaw)
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        msg.timestamp = mode.timestamp
+        msg.position = [float(v) for v in sp["position"]] if sp["position"] is not None else nan3
+        msg.velocity = [float(v) for v in sp["velocity"]] if sp["velocity"] is not None else nan3
+        msg.acceleration = nan3
+        msg.jerk = nan3
+        msg.yaw = float(sp["yaw"])
+        msg.yawspeed = math.nan
         self.setpoint_pub.publish(msg)
 
-    def publish_vehicle_command(self, command, param1=0.0, param2=0.0, param4=0.0, param5=0.0, param6=0.0,
-                                param7=0.0):
+    def hold_at(self, pos, yaw):
+        self.setpoint = {"position": pos, "velocity": None, "yaw": yaw}
+
+    def fly_velocity(self, vel, yaw):
+        self.setpoint = {"position": None, "velocity": vel, "yaw": yaw}
+
+    def send_command(self, command, p1=0.0, p2=0.0, p3=0.0):
         msg = VehicleCommand()
+        msg.timestamp = self.timestamp()
         msg.command = command
-        msg.param1 = float(param1)
-        msg.param2 = float(param2)
-        msg.param4 = float(param4)
-        msg.param5 = float(param5)
-        msg.param6 = float(param6)
-        msg.param7 = float(param7)
-        msg.target_system = self.target_system
+        msg.param1, msg.param2, msg.param3 = float(p1), float(p2), float(p3)
+        msg.target_system = self.latest["status"].system_id   # PX4 ignores commands for another system_id
         msg.target_component = 1
         msg.source_system = 1
         msg.source_component = 1
         msg.from_external = True
-        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        self.vehicle_command_pub.publish(msg)
+        self.command_pub.publish(msg)
+
+    def arm(self):
+        self.send_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0)
+
+    def engage_offboard(self):
+        self.send_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, 1.0, 6.0)        # custom mode, OFFBOARD
+
+    def hold_mode(self):
+        self.send_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, 1.0, 4.0, 3.0)   # AUTO, LOITER (Hold)
+
+    def land(self):
+        self.send_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
+
+    # ---------- obstacle avoidance ----------
+    def depth_points(self, pos):
+        """Newest depth image -> obstacle points in local NED"""
+        msg, info = self.latest["depth"], self.latest["camera_info"]
+        depth = depth_to_meters(msg)[::DEPTH_STRIDE, ::DEPTH_STRIDE]
+        if self.rays is None or self.rays.shape[:2] != depth.shape:
+            fx, fy, cx, cy = info.k[0], info.k[4], info.k[2], info.k[5]
+            v, u = np.mgrid[0:msg.height:DEPTH_STRIDE, 0:msg.width:DEPTH_STRIDE].astype(np.float64)
+            # Ray per pixel for depth = 1 m. Camera optical frame (z fwd, x right, y down) -> body FRD
+            self.rays = np.stack([np.ones_like(u), (u - cx) / fx, (v - cy) / fy], axis=-1)
+
+        valid = np.isfinite(depth) & (depth > DEPTH_MIN) & (depth < DEPTH_MAX)
+        p_body = self.rays[valid] * depth[valid][:, None] + CAM_OFFSET
+        p_ned = p_body @ quat_to_rot(self.latest["attitude"].q).T + pos
+        return p_ned[p_ned[:, 2] < self.start_z - GROUND_IGNORE]   # drop ground points (z is down)
+
+    def hold_here(self, pos, heading, reason, scan=False):
+        if self.hold_pos is None:
+            print(f"-- {reason}, holding position")
+            self.hold_pos, self.hold_yaw = pos, heading
+        if scan:    # turn slowly so the camera can look for a free direction
+            self.hold_yaw = wrap_pi(self.hold_yaw + YAW_SCAN_RATE / PLAN_RATE)
+        self.hold_at(self.hold_pos, self.hold_yaw)
+
+    def plan_step(self, goal):
+        """One 3DVFH+ step. Returns the horizontal distance to the goal"""
+        pos, heading = self.position()
+        dist_xy = math.hypot(goal[0] - pos[0], goal[1] - pos[1])
+
+        if time.monotonic() - self.stamp["depth"] > DEPTH_TIMEOUT:
+            self.hold_here(pos, heading, "No depth image")
+            return dist_xy
+
+        self.vfh.add_points(self.depth_points(pos), time.monotonic(), pos)
+        alt = self.start_z - pos[2]
+        direction = self.vfh.choose_direction(pos, goal, self.prev_dir, heading,
+                                              allow_up=alt < MAX_ALT, allow_down=alt > MIN_ALT)
+        if direction is None:
+            self.hold_here(pos, heading, "All directions blocked", scan=True)
+            return dist_xy
+        if self.hold_pos is not None:
+            print("-- Path found, continuing")
+            self.hold_pos = None
+
+        # Speed: slow near the goal and near obstacles
+        speed = MAX_SPEED * min(1.0, dist_xy / SLOW_DOWN_DIST) * self.vfh.speed_factor
+
+        # Point the camera where we fly; don't move into directions the camera hasn't seen
+        yaw = heading
+        az = math.atan2(direction[1], direction[0])
+        if dist_xy > YAW_LOCK_DIST and math.hypot(direction[0], direction[1]) > 0.5:
+            yaw = az
+            err = abs(wrap_pi(az - heading))
+            speed = 0.0 if err > MAX_HEADING_ERR else speed * math.cos(err)
+
+        self.fly_velocity(direction * speed, yaw)
+        self.prev_dir = direction
+        return dist_xy
 
 
-def main(args=None):
-    rclpy.init(args=args)
-    node = TakeoffAvoidGpsNode()
+def check_offboard(node):
+    if not node.in_offboard():
+        raise RuntimeError("Drone left offboard mode (pilot took over)")
+
+
+def fly(node, goal):
+    pos, yaw = node.position()
+
+    # Stream setpoints first, PX4 refuses offboard without them
+    node.hold_at(pos, yaw)
+    time.sleep(1.0)
+    t0 = time.monotonic()
+    last_send = 0.0
+    while not (node.is_armed() and node.in_offboard()):
+        if time.monotonic() - t0 > 5.0:
+            print("Could not arm / switch to offboard, check QGC messages")
+            node.setpoint = None
+            return
+        if time.monotonic() - last_send > 1.0:    # first command may be lost, send again every second
+            if not node.in_offboard():
+                node.engage_offboard()
+            if not node.is_armed():
+                node.arm()
+            last_send = time.monotonic()
+        time.sleep(0.1)
+    print("-- Armed, offboard")
+
+    # Take off straight up
+    takeoff = np.array([pos[0], pos[1], goal[2]])
+    node.hold_at(takeoff, yaw)
+    while abs(node.position()[0][2] - goal[2]) > 0.3:
+        check_offboard(node)
+        time.sleep(0.1)
+    print("-- Take-off done, flying to goal")
+
+    # Fly to the goal with 3DVFH+
+    last_print = 0.0
+    while True:
+        check_offboard(node)
+        dist = node.plan_step(goal)
+        if dist < ACCEPT_RADIUS:
+            break
+        if time.monotonic() - last_print > 2.0:
+            print(f"Distance to goal: {dist:.1f} m")
+            last_print = time.monotonic()
+        time.sleep(1.0 / PLAN_RATE)
+    print("-- Goal reached")
+
+    # Hover, then land
+    pos, yaw = node.position()
+    node.hold_at(pos, yaw)
+    time.sleep(2.0)
+    check_offboard(node)
+    node.land()
+    node.setpoint = None
+    print("-- Landing")
+    while node.is_armed():
+        time.sleep(0.5)
+    print("-- Landed and disarmed")
+
+
+def main():
+    global filename
+    if len(sys.argv) > 1:
+        filename = sys.argv[1]
+    else:
+        while True:
+            filename = input("Enter the name of the .json file with the goal point: ")
+            if filename_valid(filename):
+                break
+            print("This filename is invalid, because it contains a period, without ending in '.json'.")
+    if filename.find(".") == -1:
+        filename = filename + ".json"
+    goal_lat, goal_lon, goal_alt = load_goal(filename)
+    print(f"Goal: lat {goal_lat}, lon {goal_lon}, alt {goal_alt:.1f}")
+
+    # Ctrl+C raises KeyboardInterrupt but keeps ROS2 running, so we can still send Hold
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+    node = GoToGPSPoint()
+    threading.Thread(target=rclpy.spin, args=(node,), daemon=True).start()
+
     try:
-        rclpy.spin(node)
-    except (KeyboardInterrupt, SystemExit):
-        pass
-    node.destroy_node()
-    if rclpy.ok():
+        print("Waiting for GPS and camera...")
+        while not node.data_ready():
+            time.sleep(0.5)
+        print("-- Drone data OK")
+
+        # Goal in the local NED frame (origin = PX4 local position reference)
+        lp = node.latest["local_position"]
+        node.start_z = lp.z
+        north, east = gps_to_ned(goal_lat, goal_lon, lp.ref_lat, lp.ref_lon)
+        goal_z = -(goal_alt - lp.ref_alt) if USE_GOAL_ALT else lp.z - FLIGHT_ALT
+        goal_z = min(goal_z, lp.z - MIN_ALT)     # never lower than MIN_ALT above take-off
+        goal = np.array([north, east, goal_z])
+        dist = math.hypot(north - lp.x, east - lp.y)
+        print(f"Goal in local NED: ({north:.1f}, {east:.1f}, {goal_z:.1f}), {dist:.1f} m away")
+
+        if input("Enter to take off, q to quit: ") != "q":
+            fly(node, goal)
+    except RuntimeError as e:
+        print(f"Stopped: {e}")
+        node.setpoint = None
+    except KeyboardInterrupt:
+        print("Interrupted, switching to Hold")
+        if "status" in node.latest and node.in_offboard():
+            node.hold_mode()
+            time.sleep(0.5)
+        node.setpoint = None
+    finally:
+        node.destroy_node()
         rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
