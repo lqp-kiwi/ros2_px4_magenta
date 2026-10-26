@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
     Takeoff and Land for PX4 using ROS2 with GPS.
+    While hovering (OFFBOARD) the drone keeps HOLD_HEIGHT above the ground right below it,
+    measured by the downward distance sensor (vehicle_local_position.dist_bottom),
+    or above the arming point (EKF) while the sensor has no valid reading.
     Author: Phuong Le
     Lasted Updated: 2026-09-25
     Usage:
@@ -16,6 +19,8 @@ from px4_msgs.msg import (
     VehicleLocalPosition,
     FailsafeFlags,
     SensorGps,
+    OffboardControlMode,
+    TrajectorySetpoint,
 )
 
 NAN = float('nan')
@@ -26,6 +31,9 @@ NAN = float('nan')
 TARGET_SYSTEM = 10        # must match MAV_SYS_ID on the flight controller
 REQUIRE_GPS = True        # outdoor: wait for GPS/home like ensure_gps_estimate(); False indoors
 HOVER_TIME = 10.0         # s to hover after takeoff completes
+HOLD_HEIGHT = 3.0         # m above the ground below the drone (distance sensor) while hovering;
+                          # above the arming point (EKF) while the sensor has no valid reading
+HOLD_CLIMB = 0.5          # m/s, max speed of the height setpoint while hovering (no jumps)
 
 READY_TIMEOUT = 120.0     # s to wait for PX4 to be ready
 ARM_TIMEOUT = 10.0        # s to wait for ARMED
@@ -33,6 +41,8 @@ TAKEOFF_TIMEOUT = 30.0    # s to wait for takeoff to finish (then land)
 RESEND_PERIOD = 1.0       # s between command retries
 
 TOPIC_CMD = '/fmu/in/vehicle_command'
+TOPIC_OFFBOARD = '/fmu/in/offboard_control_mode'
+TOPIC_SETPOINT = '/fmu/in/trajectory_setpoint'
 TOPIC_STATUS = '/fmu/out/vehicle_status'
 TOPIC_LPOS = '/fmu/out/vehicle_local_position'
 TOPIC_FAILSAFE = '/fmu/out/failsafe_flags'
@@ -42,6 +52,13 @@ TOPIC_GPS = '/fmu/out/vehicle_gps_position'
 def field(msg, name, default=None):
     """Read a message field safely (field names can differ between PX4 versions)."""
     return getattr(msg, name, default) if msg is not None else default
+
+
+def versioned(topic, msg_type):
+    """PX4 v1.16+ adds _v<MESSAGE_VERSION> to the topic name of versioned messages
+    (e.g. vehicle_status_v4). Older PX4 uses the plain name."""
+    version = getattr(msg_type, 'MESSAGE_VERSION', 0)
+    return f'{topic}_v{version}' if version else topic
 
 
 class TakeoffLandMission(Node):
@@ -56,9 +73,14 @@ class TakeoffLandMission(Node):
         )
 
         self.cmd_pub = self.create_publisher(VehicleCommand, TOPIC_CMD, qos)
+        self.offboard_pub = self.create_publisher(OffboardControlMode, TOPIC_OFFBOARD, qos)
+        self.setpoint_pub = self.create_publisher(TrajectorySetpoint, TOPIC_SETPOINT, qos)
 
-        self.create_subscription(VehicleStatus, TOPIC_STATUS, self.status_cb, qos)
-        self.create_subscription(VehicleLocalPosition, TOPIC_LPOS, self.lpos_cb, qos)
+        # Listen to both the plain and the versioned name: works with old and new PX4
+        for topic in {TOPIC_STATUS, versioned(TOPIC_STATUS, VehicleStatus)}:
+            self.create_subscription(VehicleStatus, topic, self.status_cb, qos)
+        for topic in {TOPIC_LPOS, versioned(TOPIC_LPOS, VehicleLocalPosition)}:
+            self.create_subscription(VehicleLocalPosition, topic, self.lpos_cb, qos)
         self.create_subscription(FailsafeFlags, TOPIC_FAILSAFE, self.failsafe_cb, qos)
         self.create_subscription(SensorGps, TOPIC_GPS, self.gps_cb, qos)
 
@@ -73,6 +95,7 @@ class TakeoffLandMission(Node):
         self.last_log_time = 0.0
         self.seen_takeoff = False
         self.z0 = 0.0
+        self.hold = None          # [x, y, z, yaw] offboard setpoint while hovering (NED)
 
         self.timer = self.create_timer(0.1, self.loop)  # 10 Hz
         self.get_logger().info('Waiting for PX4 to be ready...')
@@ -100,7 +123,11 @@ class TakeoffLandMission(Node):
     def log_every(self, period, text, warn=False):
         if self.now() - self.last_log_time >= period:
             self.last_log_time = self.now()
-            (self.get_logger().warn if warn else self.get_logger().info)(text)
+            # Two separate calls: rclpy raises an error if one call site logs with different severities
+            if warn:
+                self.get_logger().warn(text)
+            else:
+                self.get_logger().info(text)
 
     def armed(self):
         return field(self.status, 'arming_state') == VehicleStatus.ARMING_STATE_ARMED
@@ -181,6 +208,7 @@ class TakeoffLandMission(Node):
                 # PX4 switches Takeoff -> Hold when MIS_TAKEOFF_ALT is reached
                 self.set_state('HOVER')
                 self.report_height()
+                self.hold = [self.lpos.x, self.lpos.y, self.lpos.z, self.lpos.heading]
             elif self.elapsed() > TAKEOFF_TIMEOUT:
                 self.get_logger().error('Takeoff did not complete - landing')
                 self.set_state('LAND')
@@ -188,10 +216,19 @@ class TakeoffLandMission(Node):
                 self.takeoff()
 
         elif self.state == 'HOVER':
+            self.follow_ground()
             if self.elapsed() >= HOVER_TIME:
                 self.set_state('LAND')
+            elif (self.nav_state() != VehicleStatus.NAVIGATION_STATE_OFFBOARD
+                  and self.elapsed() > 1.0 and self.due(RESEND_PERIOD)):
+                # PX4 only accepts OFFBOARD after setpoints have been streaming for a while
+                self.set_offboard_mode()
 
         elif self.state == 'LAND':
+            if self.armed() and self.nav_state() == VehicleStatus.NAVIGATION_STATE_OFFBOARD:
+                # Keep streaming until PX4 is in Land, otherwise the offboard-loss failsafe triggers
+                # (after landing PX4 shows OFFBOARD again, but then it is disarmed)
+                self.follow_ground()
             # No land-detector topic bridged: PX4 auto-disarms shortly after
             # touchdown (COM_DISARM_LAND), so disarmed == landed.
             if not self.armed():
@@ -216,6 +253,24 @@ class TakeoffLandMission(Node):
         else:
             self.get_logger().warn('Distance sensor: no valid reading')
 
+    def follow_ground(self):
+        """Hold x, y, heading and set z so the drone stays HOLD_HEIGHT above the ground below it
+        (distance sensor), or above the arming point (EKF) while the sensor has no valid reading.
+        The z setpoint moves at most HOLD_CLIMB, so a new target does not make the drone jump."""
+        sensors = field(self.lpos, 'dist_bottom_sensor_bitfield', 0)
+        if field(self.lpos, 'dist_bottom_valid', False) and sensors & VehicleLocalPosition.DIST_BOTTOM_SENSOR_RANGE:
+            target_z = self.lpos.z + self.lpos.dist_bottom - HOLD_HEIGHT  # NED: z grows downwards
+            self.log_every(2.0, f'Height above ground: {self.lpos.dist_bottom:.2f} m (target {HOLD_HEIGHT} m)')
+        else:
+            target_z = self.z0 - HOLD_HEIGHT
+            self.log_every(2.0, 'Distance sensor: no valid reading - height from EKF: '
+                                f'{self.z0 - self.lpos.z:.2f} m above the arming point (target {HOLD_HEIGHT} m)',
+                           warn=True)
+        step = HOLD_CLIMB * 0.1     # the loop runs at 10 Hz
+        self.hold[2] += max(-step, min(step, target_z - self.hold[2]))
+        self.publish_offboard_control_mode()
+        self.publish_trajectory_setpoint(*self.hold)
+
     # ------------------------------------------------------------- commands
     def arm(self):
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
@@ -235,6 +290,26 @@ class TakeoffLandMission(Node):
             VehicleCommand.VEHICLE_CMD_NAV_LAND,
             param4=NAN, param5=NAN, param6=NAN, param7=NAN)
         self.get_logger().info('>>> Sent LAND')
+
+    def set_offboard_mode(self):
+        # param1 = 1 (custom mode), param2 = 6 (PX4 OFFBOARD mode)
+        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0)
+        self.get_logger().info('>>> Sent OFFBOARD mode')
+
+    def publish_offboard_control_mode(self):
+        msg = OffboardControlMode()
+        msg.position = True     # control by position setpoint
+        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        self.offboard_pub.publish(msg)
+
+    def publish_trajectory_setpoint(self, x, y, z, yaw):
+        msg = TrajectorySetpoint()
+        msg.position = [float(x), float(y), float(z)]
+        msg.velocity = [NAN, NAN, NAN]
+        msg.acceleration = [NAN, NAN, NAN]
+        msg.yaw = float(yaw)
+        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        self.setpoint_pub.publish(msg)
 
     def publish_vehicle_command(self, command, param1=0.0, param2=0.0, param3=0.0,
                                 param4=0.0, param5=0.0, param6=0.0, param7=0.0):
