@@ -110,7 +110,11 @@ class TakeoffLandMission(Node):
     def log_every(self, period, text, warn=False):
         if self.now() - self.last_log_time >= period:
             self.last_log_time = self.now()
-            (self.get_logger().warn if warn else self.get_logger().info)(text)
+            # Two separate calls: rclpy raises an error if one call site logs with different severities
+            if warn:
+                self.get_logger().warn(text)
+            else:
+                self.get_logger().info(text)
 
     def armed(self):
         return field(self.status, 'arming_state') == VehicleStatus.ARMING_STATE_ARMED

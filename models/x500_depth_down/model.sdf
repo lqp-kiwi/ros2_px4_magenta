@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdf version='1.9'>
+  <!-- x500 with the depth camera of PX4's x500_depth (OakD-Lite, topic depth_camera) and a distance
+       sensor pointing down, like an infrared range finder under the drone.
+       The OakD-Lite RGB camera (1920x1080 at 30 Hz) is left out: nothing uses it, and rendering it
+       slows the simulation down (real-time factor < 1) in worlds with many trees.
+       The distance sensor is the one of PX4's x500_lidar_down: PX4's gz_bridge reads link
+       "lidar_sensor_link" / sensor "lidar" as a downward distance_sensor, EKF2 then gives the height
+       above the ground in vehicle_local_position.dist_bottom.
+
+       Run (Gazebo must find this folder):
+           export GZ_SIM_RESOURCE_PATH=$GZ_SIM_RESOURCE_PATH:~/ros2_px4_gz_ws/models
+           PX4_SYS_AUTOSTART=4002 PX4_SIM_MODEL=gz_x500_depth_down ./build/px4_sitl_default/bin/px4 -->
+  <model name='x500_depth_down'>
+    <include merge='true'>
+      <uri>x500</uri>
+    </include>
+
+    <!-- Depth camera: OakD-Lite body and its StereoOV7251 depth sensor, same place as in x500_depth -->
+    <joint name="CameraJoint" type="fixed">
+      <parent>base_link</parent>
+      <child>camera_link</child>
+    </joint>
+    <link name="camera_link">
+      <pose relative_to="base_link">.12 .03 .242 0 0 0</pose>
+      <inertial>
+        <pose>0.00358 -0.03 .014 0 0 0</pose>
+        <mass>0.061</mass>
+        <inertia>
+          <ixx>0.0000460804</ixx>
+          <ixy>0</ixy>
+          <ixz>0</ixz>
+          <iyy>0.0000055421</iyy>
+          <iyz>0</iyz>
+          <izz>0.0000436519</izz>
+        </inertia>
+      </inertial>
+      <visual name="OakD-Lite/visual">
+        <geometry>
+          <mesh>
+            <uri>model://OakD-Lite/meshes/OakDLite.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+      <collision name="OakD-Lite/collision">
+        <pose>0.00358 -0.03 .014 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.0175 0.091 0.028</size>
+          </box>
+        </geometry>
+      </collision>
+      <sensor name="StereoOV7251" type="depth_camera">
+        <gz_frame_id>camera_link</gz_frame_id>
+        <pose>0.01233 -0.03 .01878 0 0 0</pose>
+        <camera>
+          <horizontal_fov>1.274</horizontal_fov>
+          <image>
+            <width>640</width>
+            <height>480</height>
+            <format>R_FLOAT32</format>
+          </image>
+          <clip>
+            <near>0.2</near>
+            <far>19.1</far>
+          </clip>
+        </camera>
+        <always_on>1</always_on>
+        <update_rate>30</update_rate>
+        <visualize>true</visualize>
+        <topic>depth_camera</topic>
+      </sensor>
+    </link>
+
+    <!-- Distance sensor pointing down -->
+
+    <joint name="lidar_sensor_joint" type="fixed">
+      <parent>base_link</parent>
+      <child>lidar_sensor_link</child>
+    </joint>
+    <link name="lidar_sensor_link">
+      <!-- pitch 90 deg: the beam (link x axis) points down -->
+      <pose relative_to="base_link">0 0 -0.05 0 1.57 0</pose>
+      <inertial>
+        <mass>0.001</mass>
+        <inertia>
+          <ixx>0.00001</ixx>
+          <iyy>0.00001</iyy>
+          <izz>0.00001</izz>
+          <ixy>0.0</ixy>
+          <ixz>0.0</ixz>
+          <iyz>0.0</iyz>
+        </inertia>
+      </inertial>
+      <sensor name='lidar' type='gpu_lidar'>
+        <gz_frame_id>lidar_sensor_link</gz_frame_id>
+        <!-- roll 180 deg: PX4's gz_bridge recognises this orientation as "downward facing" -->
+        <pose>0 0 0 3.14 0 0</pose>
+        <update_rate>50</update_rate>
+        <ray>
+          <scan>
+            <horizontal>
+              <samples>1</samples>
+              <resolution>1</resolution>
+              <min_angle>0</min_angle>
+              <max_angle>0</max_angle>
+            </horizontal>
+            <vertical>
+              <samples>1</samples>
+              <resolution>1</resolution>
+              <min_angle>0</min_angle>
+              <max_angle>0</max_angle>
+            </vertical>
+          </scan>
+          <!-- range of a typical infrared ToF range finder (TF-Luna 0.2-8 m, TFmini Plus 0.1-12 m):
+               set it to the sensor on your drone -->
+          <range>
+            <min>0.1</min>
+            <max>12.0</max>
+            <resolution>0.01</resolution>
+          </range>
+        </ray>
+        <always_on>1</always_on>
+        <visualize>true</visualize>
+      </sensor>
+    </link>
+  </model>
+</sdf>
