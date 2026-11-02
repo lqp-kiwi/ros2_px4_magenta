@@ -1,0 +1,13 @@
+build/
+install/
+log/
+flight_logs/
+
+__pycache__/
+*.pyc
+*.egg-info/
+
+.vscode/
+.idea/
+*.swp
+.DS_Store
