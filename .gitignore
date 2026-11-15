@@ -2,12 +2,18 @@ build/
 install/
 log/
 flight_logs/
+tools/
 
 __pycache__/
 *.pyc
 *.egg-info/
 
+.claude/
 .vscode/
 .idea/
 *.swp
 .DS_Store
+
+/src/px4_msgs/
+/src/OrbbecSDK_ROS2/
+/src/Micro-XRCE-DDS-Agent/
