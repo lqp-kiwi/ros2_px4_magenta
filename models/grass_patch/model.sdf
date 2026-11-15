@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="grass_patch">
+    <static>true</static>
+    <link name="link">
+      <!-- Visual only: grass does not hold a drone back. The depth camera and the downward lidar see visuals. -->
+      <visual name="grass">
+        <cast_shadows>false</cast_shadows>
+        <geometry><mesh><uri>model://grass_patch/meshes/grass_patch.stl</uri></mesh></geometry>
+        <material><ambient>0.2 0.5 0.1 1</ambient><diffuse>0.2 0.5 0.1 1</diffuse></material>
+      </visual>
+    </link>
+  </model>
+</sdf>

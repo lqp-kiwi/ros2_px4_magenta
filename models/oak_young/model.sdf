@@ -1,0 +1,66 @@
+<!-- Young oak: the OpenRobotics Oak tree scaled to 55 % (about 3.6 m tall).
+     Mesh and textures from the Gazebo Fuel model (CC0), loaded from the Fuel cache. -->
+<sdf version="1.7">
+    <model name="oak_young">
+        <static>true</static>
+        <link name="link">
+            <collision name="collision">
+                <geometry>
+                    <mesh>
+                        <uri>https://fuel.gazebosim.org/1.0/openrobotics/models/oak tree/7/files/meshes/oak_tree.dae</uri>
+                        <scale>0.55 0.55 0.55</scale>
+                    </mesh>
+                </geometry>
+            </collision>
+            <visual name="branch">
+                <geometry>
+                    <mesh>
+                        <uri>https://fuel.gazebosim.org/1.0/openrobotics/models/oak tree/7/files/meshes/oak_tree.dae</uri>
+                        <scale>0.55 0.55 0.55</scale>
+                        <submesh>
+                            <name>Branch</name>
+                        </submesh>
+                    </mesh>
+                </geometry>
+                <material>
+                    <double_sided>true</double_sided>
+                    <diffuse>1.0 1.0 1.0</diffuse>
+                    <script>
+                        <uri>https://fuel.gazebosim.org/1.0/openrobotics/models/oak tree/7/files/materials/scripts/</uri>
+                        <uri>https://fuel.gazebosim.org/1.0/openrobotics/models/oak tree/7/files/materials/textures/</uri>
+                        <name>OakTree/Branch</name>
+                    </script>
+                    <pbr>
+                        <metal>
+                            <albedo_map>https://fuel.gazebosim.org/1.0/openrobotics/models/oak tree/7/files/materials/textures/branch_diffuse.png</albedo_map>
+                        </metal>
+                    </pbr>
+                </material>
+            </visual>
+            <visual name="bark">
+                <geometry>
+                    <mesh>
+                        <uri>https://fuel.gazebosim.org/1.0/openrobotics/models/oak tree/7/files/meshes/oak_tree.dae</uri>
+                        <scale>0.55 0.55 0.55</scale>
+                        <submesh>
+                            <name>Bark</name>
+                        </submesh>
+                    </mesh>
+                </geometry>
+                <material>
+                    <diffuse>1.0 1.0 1.0</diffuse>
+                    <script>
+                        <uri>https://fuel.gazebosim.org/1.0/openrobotics/models/oak tree/7/files/materials/scripts/</uri>
+                        <uri>https://fuel.gazebosim.org/1.0/openrobotics/models/oak tree/7/files/materials/textures/</uri>
+                        <name>OakTree/Bark</name>
+                    </script>
+                    <pbr>
+                        <metal>
+                            <albedo_map>https://fuel.gazebosim.org/1.0/openrobotics/models/oak tree/7/files/materials/textures/bark_diffuse.png</albedo_map>
+                        </metal>
+                    </pbr>
+                </material>
+            </visual>
+        </link>
+    </model>
+</sdf>
