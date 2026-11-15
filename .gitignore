@@ -2,13 +2,16 @@ build/
 install/
 log/
 flight_logs/
-tools/
 
 __pycache__/
 *.pyc
 *.egg-info/
 
-.claude/
+# Personal Claude Code files; the project plugins in .claude/skills/ are versioned.
+.claude/settings.local.json
+.claude/worktrees/
+CLAUDE.local.md
+
 .vscode/
 .idea/
 *.swp
