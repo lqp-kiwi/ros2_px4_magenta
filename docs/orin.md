@@ -68,20 +68,17 @@ Nếu rosdep chưa khởi tạo, chạy `sudo rosdep init` một lần. Sau đó
 
 ```bash
 rosdep update
-rosdep install --from-paths src --ignore-src --rosdistro jazzy -r -y \
-  --skip-keys python3-pymavlink-pip
-python3 -m pip install --target "$HOME/.local/share/ros2_px4_python" 'pymavlink>=2.4,<3'
-export PYTHONPATH="$HOME/.local/share/ros2_px4_python${PYTHONPATH:+:$PYTHONPATH}"
+rosdep install --from-paths src --ignore-src --rosdistro jazzy -r -y
 bash tools/build_workspace.sh --with-agent
 source install/jazzy-aarch64/setup.bash
 ```
 
 Script chỉ build; không cài apt package hay chạy camera, Gazebo hoặc mission.
-`pymavlink` được dùng trong mission GPS hiện tại. Lệnh pip cài vào thư mục
-riêng để dùng được với Python hệ thống của ROS trên Ubuntu 24.04; thêm dòng
-`export PYTHONPATH=...` ở trên vào terminal chạy mission khi cần.
 Các package được build tuần tự. Với board ít RAM, giảm số tác vụ biên dịch
-bằng `--jobs` theo `--help`.
+bằng `--jobs` theo `--help`. Không cần cài `pymavlink` trên Orin: chỉ
+`obstacle_avoidance_static_gps` (Position mode, từ 2026-11-16, chỉ chạy trong
+SITL) dùng nó. `package.xml` khai báo `python3-pymavlink-pip`; nếu rosdep
+không cài được thì `-r` cho phép bỏ qua.
 
 Mỗi bản ROS và kiến trúc CPU dùng thư mục `build/`, `install/`, `log/` riêng.
 Trên Orin, các package ROS được cài tại `install/jazzy-aarch64/`; Agent ở
@@ -90,6 +87,33 @@ riêng của Agent vào môi trường ROS.
 
 Trên PC Humble, dùng các package `ros-humble-*` tương ứng và cài thêm
 `ros-humble-fastcdr ros-humble-fastrtps` để build Agent với DDS hệ thống.
+
+## Kết nối PX4 và chạy mission
+
+Các node trong `px4_control` chỉ nói chuyện với PX4 qua topic ROS 2
+`/fmu/in/*` và `/fmu/out/*` của Micro XRCE-DDS Agent. Vì vậy cùng một code
+chạy được trong SITL và trên drone thật; chỉ lệnh chạy Agent khác nhau:
+
+| Máy | Lệnh Agent |
+| --- | --- |
+| PC, SITL | `MicroXRCEAgent udp4 -p 8888` |
+| Orin, flight controller qua serial | `install/agent-jazzy-aarch64/bin/MicroXRCEAgent serial --dev /dev/ttyUSB0 -b 921600` |
+
+Baud của Agent phải bằng `SER_*_BAUD` của cổng PX4 chọn trong
+`UXRCE_DDS_CFG` (drone hiện tại: TELEM2, `SER_TEL2_BAUD` = 921600 từ 2026-11-16;
+đổi `SER_*` phải khởi động lại flight controller). Kiểm tra link trước khi bay:
+`ros2 topic hz /fmu/out/vehicle_local_position` và
+`ros2 topic echo --once /fmu/out/vehicle_status`.
+
+Trên drone thật chạy `obstacle_avoidance_static_offboard`: bay OFFBOARD bằng
+setpoint vận tốc. PX4 1.14 không bridge `/fmu/in/manual_control_input` qua
+uXRCE-DDS, nên `obstacle_avoidance_static_gps` (cùng thuật toán, Position mode)
+gửi stick ảo qua MAVLink bằng pymavlink và chỉ dùng trong SITL: Orin không có
+link MAVLink tới flight controller (TELEM1 là radio SiK, TELEM2 là uXRCE-DDS),
+và PX4 1.14 chỉ nhận stick từ node hoặc từ tay điều khiển (`COM_RC_IN_MODE`),
+nên phi công không lấy lại quyền được. Trong OFFBOARD,
+công tắc mode trên tay điều khiển luôn lấy lại quyền; đặt `COM_RC_OVERRIDE = 3`
+nếu muốn gạt stick cũng lấy lại được.
 
 ## Quyền USB và kiểm tra camera
 
