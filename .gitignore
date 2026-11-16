@@ -8,8 +8,7 @@ __pycache__/
 *.egg-info/
 
 # Personal Claude Code files; the project plugins in .claude/skills/ are versioned.
-.claude/settings.local.json
-.claude/worktrees/
+.claude/
 CLAUDE.local.md
 
 .vscode/
