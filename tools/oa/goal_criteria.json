@@ -1,0 +1,33 @@
+{
+  "goal": "Fly a PX4 quadrotor from take-off to a GPS goal and land there, avoiding obstacles seen by the forward depth camera (Gazebo depth camera in SITL, Orbbec Gemini 336L on the real drone).",
+  "main_node": "obstacle_avoidance_static_offboard",
+  "main_node_summary": "3DVFH+ (vfh3d.py) in PX4 OFFBOARD, velocity setpoints over uXRCE-DDS (same code in SITL and on the Orin; named obstacle_avoidance_static_gps until 2026-11-16, which now flies Position mode), FlightLogger output (flight.csv, vfh.npz, plots).",
+  "criteria": {
+    "goal_radius_m": 1.5,
+    "must_land": true,
+    "min_clearance_m": 1.0,
+    "max_airborne_s": 600,
+    "forbidden_nav_states": [5, 12, 13],
+    "crash_descent_mps": 2.0,
+    "crash_speed_mps": 2.5,
+    "disarm_in_air_height_m": 1.0
+  },
+  "criteria_notes": {
+    "goal_radius_m": "final horizontal distance to the goal (dist_goal column); equals ACCEPT_RADIUS of the main node",
+    "must_land": "the flight must end disarmed after having flown (max height >= 1 m)",
+    "min_clearance_m": "minimum of nearest_all (else nearest_ahead) while airborne in the hover/cruise phases; VFH3D keeps safety_radius = 1.5 m",
+    "max_airborne_s": "time between the first and last airborne row; the forest route is about 52 m at MAX_SPEED 0.5 m/s (0.3 until 2026-11-15)",
+    "forbidden_nav_states": "PX4 1.14 nav_state values that mean a failsafe: 5 AUTO_RTL, 12 DESCEND, 13 TERMINATION",
+    "crash_descent_mps": "vd (down positive) faster than this outside the landing/stopping phases counts as a fall",
+    "crash_speed_mps": "any speed above this counts as a crash or a tumble (the main node flies at up to 0.5 m/s)",
+    "disarm_in_air_height_m": "disarming while higher than this counts as a crash"
+  },
+  "acceptance": {
+    "stage_1_sitl": "my_forest world, goal worlds/forest_goal.json, main node: 3 PASS flights in a row",
+    "stage_2_sitl_moving": "same world plus worlds/moving_obstacle.py crossing the route: 3 PASS flights in a row",
+    "stage_3_real": "real drone over open ground with one obstacle, PASS with a pilot ready on the radio",
+    "consecutive_passes": 3,
+    "sitl_world": "my_forest",
+    "sitl_goal": "worlds/forest_goal.json"
+  }
+}

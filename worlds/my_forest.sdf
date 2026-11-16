@@ -1,0 +1,300 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdf version="1.9">
+  <!-- name must match the file name: PX4_GZ_WORLD=my_world -->
+  <world name="my_forest">
+    <!-- No <plugin> here: PX4's server.config loads the physics/sensor systems.
+         Adding any <plugin> to the world makes Gazebo ignore server.config. -->
+    <physics type="ode">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
+    <gravity>0 0 -9.8</gravity>
+    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+    <atmosphere type="adiabatic"/>
+    <scene>
+      <grid>false</grid>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.7 0.7 0.7 1</background>
+      <shadows>true</shadows>
+    </scene>
+
+    <light name="sun" type="directional">
+      <pose>0 0 500 0 0 0</pose>
+      <cast_shadows>true</cast_shadows>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <direction>0.001 0.625 -0.78</direction>
+    </light>
+
+    <!-- GPS origin of the world (needed for GPS / global position) -->
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>47.397971057728974</latitude_deg>
+      <longitude_deg>8.546163739800146</longitude_deg>
+      <elevation>0</elevation>
+    </spherical_coordinates>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>200 200</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>200 200</size></plane></geometry>
+          <material>
+            <ambient>0.5 0.6 0.5 1</ambient>
+            <diffuse>0.5 0.6 0.5 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Marks on the ground: green = start (spawn point), red = goal (worlds/forest_goal.json).
+         Radius 1.5 m = ACCEPT_RADIUS of obstacle_avoidance_static_gps: over the edge of the red mark its final
+         approach starts, the drone then lands on the center.
+         Visual only and at most 2 cm high: the depth camera and the downward lidar of the drone see visuals too.
+         Below GROUND_IGNORE (0.5 m) the planner ignores them; a pole would be an obstacle for 3DVFH+. -->
+    <model name="start_mark">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="link">
+        <visual name="outer">
+          <pose>0 0 0.005 0 0 0</pose>
+          <cast_shadows>false</cast_shadows>
+          <geometry><cylinder><radius>1.5</radius><length>0.01</length></cylinder></geometry>
+          <material><ambient>0 0.7 0.1 1</ambient><diffuse>0 0.7 0.1 1</diffuse><emissive>0 0.35 0.05 1</emissive></material>
+        </visual>
+        <visual name="ring">
+          <pose>0 0 0.0075 0 0 0</pose>
+          <cast_shadows>false</cast_shadows>
+          <geometry><cylinder><radius>1.0</radius><length>0.015</length></cylinder></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><emissive>0.5 0.5 0.5 1</emissive></material>
+        </visual>
+        <visual name="center">
+          <pose>0 0 0.01 0 0 0</pose>
+          <cast_shadows>false</cast_shadows>
+          <geometry><cylinder><radius>0.5</radius><length>0.02</length></cylinder></geometry>
+          <material><ambient>0 0.7 0.1 1</ambient><diffuse>0 0.7 0.1 1</diffuse><emissive>0 0.35 0.05 1</emissive></material>
+        </visual>
+      </link>
+    </model>
+    <model name="goal_mark">
+      <static>true</static>
+      <!-- Where the GPS point of forest_goal.json really is: PX4's SIM_GZ_HOME_LAT/LON differ a little from
+           <spherical_coordinates>. Measured landing points agree within 2 cm. -->
+      <pose>51.98 -0.105 0 0 0 0</pose>
+      <link name="link">
+        <visual name="outer">
+          <pose>0 0 0.005 0 0 0</pose>
+          <cast_shadows>false</cast_shadows>
+          <geometry><cylinder><radius>1.5</radius><length>0.01</length></cylinder></geometry>
+          <material><ambient>0.85 0 0 1</ambient><diffuse>0.85 0 0 1</diffuse><emissive>0.42 0 0 1</emissive></material>
+        </visual>
+        <visual name="ring">
+          <pose>0 0 0.0075 0 0 0</pose>
+          <cast_shadows>false</cast_shadows>
+          <geometry><cylinder><radius>1.0</radius><length>0.015</length></cylinder></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><emissive>0.5 0.5 0.5 1</emissive></material>
+        </visual>
+        <visual name="center">
+          <pose>0 0 0.01 0 0 0</pose>
+          <cast_shadows>false</cast_shadows>
+          <geometry><cylinder><radius>0.5</radius><length>0.02</length></cylinder></geometry>
+          <material><ambient>0.85 0 0 1</ambient><diffuse>0.85 0 0 1</diffuse><emissive>0.42 0 0 1</emissive></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Forest for obstacle avoidance tests. Pose = x(east) y(north) z roll pitch yaw (m, rad).
+         The drone spawns at 0 0 0 facing +x; goal in worlds/forest_goal.json at x=52, y=0.
+         Trees fill x = 8..44 m, y = -18..18 m; between the canopies of tall trees there
+         are at least 3.5 m free at 1.5 - 4.5 m height. Types (height):
+           oak 6.5 m, oak_young 3.6 m, pine 5.1 m, pine_tall 8.1 m: obstacles at the flight altitude (3 m)
+           juniper 1.5 m, bush 1 m: below the flight altitude (the downward distance sensor sees them)
+         oak_young, pine_tall and bush are in this workspace's models/: add it to GZ_SIM_RESOURCE_PATH.
+         Trees come from Gazebo Fuel (downloaded to ~/.gz/fuel on first run). -->
+    <include>
+      <uri>model://oak_young</uri>
+      <name>oak_young_1</name>
+      <pose>8.1 -13.2 0 0 0 0.45</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine Tree</uri>
+      <name>pine_1</name>
+      <pose>8.1 -4.5 0 0 0 -0.45</pose>
+    </include>
+    <include>
+      <uri>model://bush</uri>
+      <name>bush_1</name>
+      <pose>8.2 0.8 0 0 0 0.49</pose>
+    </include>
+    <include>
+      <uri>model://pine_tall</uri>
+      <name>pine_tall_1</name>
+      <pose>8.2 7.7 0 0 0 -1.85</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/shrijitsingh99/models/Juniper Tree</uri>
+      <name>juniper_1</name>
+      <pose>10.8 3.6 0 0 0 1.97</pose>
+    </include>
+    <include>
+      <uri>model://bush</uri>
+      <name>bush_2</name>
+      <pose>12.6 -17.8 0 0 0 2.03</pose>
+    </include>
+    <include>
+      <uri>model://pine_tall</uri>
+      <name>pine_tall_2</name>
+      <pose>14.0 0.3 0 0 0 0.96</pose>
+    </include>
+    <include>
+      <uri>model://bush</uri>
+      <name>bush_3</name>
+      <pose>14.1 6.1 0 0 0 -2.13</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/shrijitsingh99/models/Juniper Tree</uri>
+      <name>juniper_2</name>
+      <pose>15.3 -16.4 0 0 0 0.13</pose>
+    </include>
+    <include>
+      <uri>model://bush</uri>
+      <name>bush_4</name>
+      <pose>15.3 -13.3 0 0 0 -1.08</pose>
+    </include>
+    <include>
+      <uri>model://pine_tall</uri>
+      <name>pine_tall_3</name>
+      <pose>15.7 -7.0 0 0 0 -1.57</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak tree</uri>
+      <name>oak_1</name>
+      <pose>17.0 16.3 0 0 0 2.85</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/shrijitsingh99/models/Juniper Tree</uri>
+      <name>juniper_3</name>
+      <pose>18.4 -10.9 0 0 0 3.12</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/shrijitsingh99/models/Juniper Tree</uri>
+      <name>juniper_4</name>
+      <pose>19.7 -2.8 0 0 0 -2.86</pose>
+    </include>
+    <include>
+      <uri>model://pine_tall</uri>
+      <name>pine_tall_4</name>
+      <pose>19.8 -16.3 0 0 0 2.26</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine Tree</uri>
+      <name>pine_2</name>
+      <pose>20.2 4.9 0 0 0 0.65</pose>
+    </include>
+    <include>
+      <uri>model://bush</uri>
+      <name>bush_5</name>
+      <pose>21.0 -0.2 0 0 0 -0.74</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/shrijitsingh99/models/Juniper Tree</uri>
+      <name>juniper_5</name>
+      <pose>21.9 -4.9 0 0 0 -1.36</pose>
+    </include>
+    <include>
+      <uri>model://bush</uri>
+      <name>bush_6</name>
+      <pose>22.4 8.7 0 0 0 1.1</pose>
+    </include>
+    <include>
+      <uri>model://pine_tall</uri>
+      <name>pine_tall_5</name>
+      <pose>22.9 -9.2 0 0 0 -0.27</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/shrijitsingh99/models/Juniper Tree</uri>
+      <name>juniper_6</name>
+      <pose>23.7 -13.1 0 0 0 1.17</pose>
+    </include>
+    <include>
+      <uri>model://bush</uri>
+      <name>bush_7</name>
+      <pose>26.7 16.8 0 0 0 1.02</pose>
+    </include>
+    <include>
+      <uri>model://bush</uri>
+      <name>bush_8</name>
+      <pose>27.8 -7.9 0 0 0 -2.31</pose>
+    </include>
+    <include>
+      <uri>model://pine_tall</uri>
+      <name>pine_tall_6</name>
+      <pose>29.0 12.4 0 0 0 1.68</pose>
+    </include>
+    <include>
+      <uri>model://oak_young</uri>
+      <name>oak_young_2</name>
+      <pose>30.1 -16.4 0 0 0 3.03</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Oak tree</uri>
+      <name>oak_2</name>
+      <pose>31.0 0.5 0 0 0 2.95</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine Tree</uri>
+      <name>pine_3</name>
+      <pose>33.6 17.6 0 0 0 0.71</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine Tree</uri>
+      <name>pine_4</name>
+      <pose>35.4 -9.9 0 0 0 -2.86</pose>
+    </include>
+    <include>
+      <uri>model://pine_tall</uri>
+      <name>pine_tall_7</name>
+      <pose>36.8 11.1 0 0 0 -3.12</pose>
+    </include>
+    <include>
+      <uri>model://bush</uri>
+      <name>bush_9</name>
+      <pose>38.1 -13.6 0 0 0 -2.3</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/shrijitsingh99/models/Juniper Tree</uri>
+      <name>juniper_7</name>
+      <pose>39.1 4.3 0 0 0 2.77</pose>
+    </include>
+    <include>
+      <uri>model://pine_tall</uri>
+      <name>pine_tall_8</name>
+      <pose>41.9 -7.1 0 0 0 -1.24</pose>
+    </include>
+    <include>
+      <uri>https://fuel.gazebosim.org/1.0/OpenRobotics/models/Pine Tree</uri>
+      <name>pine_5</name>
+      <pose>42.2 0.6 0 0 0 -0.84</pose>
+    </include>
+    <include>
+      <uri>model://oak_young</uri>
+      <name>oak_young_3</name>
+      <pose>43.4 16.9 0 0 0 2.5</pose>
+    </include>
+    <include>
+      <uri>model://pine_tall</uri>
+      <name>pine_tall_9</name>
+      <pose>43.7 7.9 0 0 0 -1.17</pose>
+    </include>
+    <include>
+      <uri>model://oak_young</uri>
+      <name>oak_young_4</name>
+      <pose>43.9 -16.4 0 0 0 0.31</pose>
+    </include>
+  </world>
+</sdf>

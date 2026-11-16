@@ -1,0 +1,10 @@
+[
+  {
+    "description": "Sim goal for worlds/my_world.sdf: 44 m east, 1 m north of the spawn point, 3 m above the ground. The straight line from the spawn point to here goes through the oak tree at (22, 0.5).",
+    "global_position": {
+      "lat": 47.39798004945917,
+      "lon": 8.546748317114517,
+      "alt": 3.0
+    }
+  }
+]

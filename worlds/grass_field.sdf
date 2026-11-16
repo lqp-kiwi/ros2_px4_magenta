@@ -1,0 +1,290 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdf version="1.9">
+  <!-- name must match the file name: PX4_GZ_WORLD=grass_field -->
+  <world name="grass_field">
+    <!-- No <plugin> here: PX4's server.config loads the physics/sensor systems.
+         Adding any <plugin> to the world makes Gazebo ignore server.config. -->
+    <physics type="ode">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
+    <gravity>0 0 -9.8</gravity>
+    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+    <atmosphere type="adiabatic"/>
+    <scene>
+      <grid>false</grid>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.7 0.7 0.7 1</background>
+      <shadows>true</shadows>
+    </scene>
+
+    <light name="sun" type="directional">
+      <pose>0 0 500 0 0 0</pose>
+      <cast_shadows>true</cast_shadows>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <direction>0.001 0.625 -0.78</direction>
+    </light>
+
+    <!-- GPS origin of the world (needed for GPS / global position) -->
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>47.397971057728974</latitude_deg>
+      <longitude_deg>8.546163739800146</longitude_deg>
+      <elevation>0</elevation>
+    </spherical_coordinates>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>200 200</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>200 200</size></plane></geometry>
+          <material>
+            <ambient>0.5 0.6 0.5 1</ambient>
+            <diffuse>0.5 0.6 0.5 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Marks on the ground: green = start (spawn point), red = goal (worlds/grass_goal.json) -->
+    <model name="start_mark">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="link">
+        <visual name="outer">
+          <pose>0 0 0.005 0 0 0</pose>
+          <cast_shadows>false</cast_shadows>
+          <geometry><cylinder><radius>1.5</radius><length>0.01</length></cylinder></geometry>
+          <material><ambient>0 0.7 0.1 1</ambient><diffuse>0 0.7 0.1 1</diffuse><emissive>0 0.35 0.05 1</emissive></material>
+        </visual>
+        <visual name="ring">
+          <pose>0 0 0.0075 0 0 0</pose>
+          <cast_shadows>false</cast_shadows>
+          <geometry><cylinder><radius>1.0</radius><length>0.015</length></cylinder></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><emissive>0.5 0.5 0.5 1</emissive></material>
+        </visual>
+        <visual name="center">
+          <pose>0 0 0.01 0 0 0</pose>
+          <cast_shadows>false</cast_shadows>
+          <geometry><cylinder><radius>0.5</radius><length>0.02</length></cylinder></geometry>
+          <material><ambient>0 0.7 0.1 1</ambient><diffuse>0 0.7 0.1 1</diffuse><emissive>0 0.35 0.05 1</emissive></material>
+        </visual>
+      </link>
+    </model>
+    <model name="goal_mark">
+      <static>true</static>
+      <!-- Where the GPS point of grass_goal.json really is: PX4's SIM_GZ_HOME_LAT/LON differ a little from
+           <spherical_coordinates>. Measured landing points agree within 2 cm. -->
+      <pose>19.99 -0.105 0 0 0 0</pose>
+      <link name="link">
+        <visual name="outer">
+          <pose>0 0 0.005 0 0 0</pose>
+          <cast_shadows>false</cast_shadows>
+          <geometry><cylinder><radius>1.5</radius><length>0.01</length></cylinder></geometry>
+          <material><ambient>0.85 0 0 1</ambient><diffuse>0.85 0 0 1</diffuse><emissive>0.42 0 0 1</emissive></material>
+        </visual>
+        <visual name="ring">
+          <pose>0 0 0.0075 0 0 0</pose>
+          <cast_shadows>false</cast_shadows>
+          <geometry><cylinder><radius>1.0</radius><length>0.015</length></cylinder></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse><emissive>0.5 0.5 0.5 1</emissive></material>
+        </visual>
+        <visual name="center">
+          <pose>0 0 0.01 0 0 0</pose>
+          <cast_shadows>false</cast_shadows>
+          <geometry><cylinder><radius>0.5</radius><length>0.02</length></cylinder></geometry>
+          <material><ambient>0.85 0 0 1</ambient><diffuse>0.85 0 0 1</diffuse><emissive>0.42 0 0 1</emissive></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Grass about 0.5 m tall (visual only) on x = -6..30 m, y = -8..8 m. The drone spawns at 0 0 0 facing +x;
+         goal in worlds/grass_goal.json at x = 20, y = 0. grass_patch is in this workspace's models/. -->
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_0_0</name>
+      <pose>-4 -6 0 0 0 4.7124</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_0_1</name>
+      <pose>-4 -2 0 0 0 4.7124</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_0_2</name>
+      <pose>-4 2 0 0 0 4.7124</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_0_3</name>
+      <pose>-4 6 0 0 0 3.1416</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_1_0</name>
+      <pose>0 -6 0 0 0 0.0000</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_1_1</name>
+      <pose>0 -2 0 0 0 0.0000</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_1_2</name>
+      <pose>0 2 0 0 0 0.0000</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_1_3</name>
+      <pose>0 6 0 0 0 3.1416</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_2_0</name>
+      <pose>4 -6 0 0 0 0.0000</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_2_1</name>
+      <pose>4 -2 0 0 0 4.7124</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_2_2</name>
+      <pose>4 2 0 0 0 1.5708</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_2_3</name>
+      <pose>4 6 0 0 0 3.1416</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_3_0</name>
+      <pose>8 -6 0 0 0 3.1416</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_3_1</name>
+      <pose>8 -2 0 0 0 3.1416</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_3_2</name>
+      <pose>8 2 0 0 0 3.1416</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_3_3</name>
+      <pose>8 6 0 0 0 3.1416</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_4_0</name>
+      <pose>12 -6 0 0 0 1.5708</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_4_1</name>
+      <pose>12 -2 0 0 0 1.5708</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_4_2</name>
+      <pose>12 2 0 0 0 1.5708</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_4_3</name>
+      <pose>12 6 0 0 0 0.0000</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_5_0</name>
+      <pose>16 -6 0 0 0 4.7124</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_5_1</name>
+      <pose>16 -2 0 0 0 4.7124</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_5_2</name>
+      <pose>16 2 0 0 0 4.7124</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_5_3</name>
+      <pose>16 6 0 0 0 0.0000</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_6_0</name>
+      <pose>20 -6 0 0 0 3.1416</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_6_1</name>
+      <pose>20 -2 0 0 0 1.5708</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_6_2</name>
+      <pose>20 2 0 0 0 0.0000</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_6_3</name>
+      <pose>20 6 0 0 0 4.7124</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_7_0</name>
+      <pose>24 -6 0 0 0 0.0000</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_7_1</name>
+      <pose>24 -2 0 0 0 0.0000</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_7_2</name>
+      <pose>24 2 0 0 0 1.5708</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_7_3</name>
+      <pose>24 6 0 0 0 4.7124</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_8_0</name>
+      <pose>28 -6 0 0 0 1.5708</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_8_1</name>
+      <pose>28 -2 0 0 0 1.5708</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_8_2</name>
+      <pose>28 2 0 0 0 4.7124</pose>
+    </include>
+    <include>
+      <uri>model://grass_patch</uri>
+      <name>grass_8_3</name>
+      <pose>28 6 0 0 0 3.1416</pose>
+    </include>
+  </world>
+</sdf>

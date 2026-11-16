@@ -1,0 +1,10 @@
+[
+  {
+    "description": "Sim goal for worlds/my_forest.sdf: 52 m east of the spawn point, behind the forest, 3 m above the ground. The straight line from the spawn point to here goes through a tall pine, a bush and a big oak.",
+    "global_position": {
+      "lat": 47.39797105565369,
+      "lon": 8.546854603781025,
+      "alt": 3.0
+    }
+  }
+]

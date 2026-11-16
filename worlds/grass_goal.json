@@ -1,0 +1,10 @@
+[
+  {
+    "description": "Sim goal for worlds/grass_field.sdf: 20 m east of the spawn point, over grass about 0.5 m tall.",
+    "global_position": {
+      "lat": 47.39797105565369,
+      "lon": 8.546429456715869,
+      "alt": 3.0
+    }
+  }
+]
