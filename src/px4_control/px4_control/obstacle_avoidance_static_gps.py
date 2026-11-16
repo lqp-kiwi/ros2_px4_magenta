@@ -11,7 +11,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import Image, CameraInfo
-from px4_msgs.msg import VehicleGlobalPosition, VehicleLocalPosition, VehicleAttitude, VehicleStatus, VehicleCommand
+from px4_msgs.msg import (VehicleGlobalPosition, VehicleLocalPosition, VehicleAttitude, VehicleStatus,
+                          VehicleCommand)
 from pymavlink import mavutil
 
 from px4_control.vfh3d import VFH3D
@@ -19,28 +20,44 @@ from px4_control.flight_logger import FlightLogger
 from px4_control.gps_point import load_gps_point
 
 """
-Script Name: go_to_gps_point.py
+Script Name: obstacle_avoidance_static_gps.py
 Description: Takes off, flies to the GPS point saved in a .json file by record_drone_state.py
              and lands there. Obstacles seen by the depth camera are avoided with 3DVFH+ (vfh3d.py).
              The camera node (depth_camera package) must already be running.
-             The whole flight is in Position (GPS) mode, never OFFBOARD: from before arming until PX4 disarms
-             after landing, the node only moves virtual sticks (MAVLink MANUAL_CONTROL).
+             The whole flight is in Position (GPS) mode, never OFFBOARD: from before arming until
+             PX4 disarms after landing, the node only moves virtual sticks (MAVLink MANUAL_CONTROL).
+             PX4 1.14 does not bridge /fmu/in/manual_control_input over uXRCE-DDS, so the sticks go
+             over a MAVLink link (pymavlink, MAVLINK_URL); the uXRCE-DDS agent still brings the PX4
+             topics and the mode and arm commands.
+             obstacle_avoidance_static_offboard.py flies the same way in OFFBOARD over uXRCE-DDS only.
+             Stopped (sticks centered), PX4 brakes and holds the GPS position.
+             Take-off: a quick lift-off (LIFTOFF_SPEED), then a slow climb (TAKEOFF_SPEED).
+             Sitting on the ground at nearly hover thrust makes the drone rock and yaw at lift-off.
+             No local position from PX4 for LPOS_TIMEOUT: the drone brakes smoothly and waits.
+             SITL only for now. On the real drone PX4 1.14 takes the sticks either from the radio
+             or from the node (COM_RC_IN_MODE), so a pilot could not take over, and the Orin has
+             neither a MAVLink link (TELEM1: SiK radio, TELEM2: uXRCE-DDS) nor pymavlink.
 
 PX4 parameters:
-    COM_RC_IN_MODE = 1   PX4 takes the node's sticks (MAVLink only, SITL default). While they come in, PX4 ignores
-                         a radio, its sticks and its mode switch. With 3 (keep first) and a radio switched on
-                         first, the radio is used and the node's sticks are ignored.
-    COM_RCL_EXCEPT = 2   Ctrl+C brakes, switches to Hold and ends the node, so PX4 loses the sticks: without this
-                         value that triggers the manual control loss failsafe NAV_RCL_ACT (default Return: climbs
-                         to RTL_RETURN_ALT, flies home and lands). With it the drone stays in Hold.
+    COM_RC_IN_MODE = 1   PX4 takes the node's sticks (MAVLink only, SITL default). While they come
+                         in, PX4 ignores a radio, its sticks and its mode switch. With 3 (keep
+                         first) and a radio switched on first, the radio is used and the node's
+                         sticks are ignored.
+    COM_RCL_EXCEPT = 2   Ctrl+C brakes, switches to Hold and ends the node, so PX4 loses the
+                         sticks: without this value that triggers the manual control loss failsafe
+                         NAV_RCL_ACT (default Return: climbs to RTL_RETURN_ALT, flies home and
+                         lands). With it the drone stays in Hold. The SITL parameters.bson has 0.
                          If the node dies in Position mode the failsafe always triggers.
     MPC_*                must match the constants below, velocity_to_sticks() depends on them.
+    MPC_THR_HOVER        the real hover thrust (hover_thrust_estimate of a flight log), else
+                         the lift-off is slow.
 
-Last Modified: 2026-11-09
+Last Modified: 2026-11-16
 
 Usage:
-    ros2 run px4_control obstacle_avoidance_static_gps            the point saved by record_drone_state (gps_point.py)
-    ros2 run px4_control obstacle_avoidance_static_gps filename   the first point in this .json file
+    MicroXRCEAgent udp4 -p 8888                                   SITL, PX4 topics and commands
+    ros2 run px4_control obstacle_avoidance_static_gps            point of record_drone_state
+    ros2 run px4_control obstacle_avoidance_static_gps filename   first point of this .json
 """
 
 # PX4 topics to read: name -> (topic, message type)
@@ -56,10 +73,10 @@ CAMERA_INFO_TOPIC = "/camera/depth/camera_info"
 MAX_EPH = 3.0             # max horizontal position error (m) before flying is allowed
 
 # Flight
-FLIGHT_ALT = 3.0          # flight height above the ground below the drone, measured by the downward distance
+FLIGHT_ALT = 2.0          # flight height above the ground below the drone, measured by the downward distance
                           # sensor; above the take-off point (EKF) while the sensor has no valid reading (m)
 USE_GOAL_ALT = False      # True: fly at the altitude saved in the .json instead of FLIGHT_ALT
-MIN_ALT = 1.5             # height band (same reference as FLIGHT_ALT) allowed while avoiding (m)
+MIN_ALT = 1             # height band (same reference as FLIGHT_ALT) allowed while avoiding (m)
 MAX_ALT = 8.0
 ALT_GAIN = 0.5            # vertical speed per meter of height error when holding FLIGHT_ALT (1/s)
 MAX_CLIMB = 0.3           # max vertical speed when holding FLIGHT_ALT (m/s)
@@ -70,15 +87,25 @@ APPROACH_GAIN = 0.4       # horizontal speed per meter from the center (1/s)
 APPROACH_TIMEOUT = 60.0   # land anyway when not settled over the center after this long (s)
 SETTLE_TIME = 1.0         # stay within LAND_RADIUS this long before landing (s)
 LAND_FIX_HEIGHT = 0.5     # no more horizontal corrections below this height, for a straight touchdown (m)
-MAX_SPEED = 0.3           # (m/s)
+MAX_SPEED = 0.5           # horizontal speed in cruise, lower near obstacles (m/s)
 SLOW_DOWN_DIST = 1.5      # start slowing down this far from the goal (m)
 YAW_LOCK_DIST = 2.0       # closer than this to the goal: stop turning towards the flight direction (m)
 MAX_HEADING_ERR = math.radians(50)  # only move when the camera looks within this angle of where the drone goes
 FULL_SPEED_HEADING_ERR = math.radians(25)  # full speed below this heading error, slower up to MAX_HEADING_ERR
 YAW_SCAN_RATE = math.radians(20)    # turn speed when every direction is blocked (rad/s)
 PLAN_RATE = 10.0          # 3DVFH+ steps per second
-SETPOINT_RATE = 20.0      # virtual stick messages per second (PX4 loses them after COM_RC_LOSS_T = 0.5 s)
-TAKEOFF_SPEED = 0.35      # climb speed during take-off (m/s), below 0.29 the stick stays under PX4's take-off limit
+SETPOINT_RATE = 20.0      # stick messages per second (PX4 loses them after COM_RC_LOSS_T, 0.5 s)
+# Telemetry: over the 921600 baud link of the real drone PX4's local position stalled for 3.5 s
+# (obstacle_hold_gps, flight 20261109_153650). Meanwhile the node does not know where the drone is.
+LPOS_TIMEOUT = 0.5        # no local position for this long: brake smoothly to a stop and wait (s)
+TAKEOFF_SPEED = 0.35      # climb speed during take-off, once off the ground (m/s)
+# Lift-off: with a slow climb PX4 raises the thrust only through its integrator (MPC_THR_HOVER
+# below the real hover thrust). Seconds on the ground at nearly hover thrust wind up the attitude
+# integrators, and the drone rocks and yaws when it lifts off. So it climbs faster until it is up.
+# Off the ground = climbing at half of LIFTOFF_SPEED, or the distance sensor LIFTOFF_HEIGHT higher.
+# Not the EKF height: near the ground the baro drifts (+0.26 m on the ground, 0.8 m off at 0.9 m).
+LIFTOFF_SPEED = 1.0       # climb speed asked for until the drone has left the ground (m/s)
+LIFTOFF_HEIGHT = 0.3      # (m)
 LAND_SPEED = 0.35         # descent speed when landing (m/s)
 LAND_SPEED_MIN = 0.35     # near the ground: above 1.1 * LNDMC_Z_VEL_MAX, or PX4 never detects the landing (m/s)
 LAND_GAIN = 0.5           # descent speed per meter of height when landing (1/s)
@@ -96,10 +123,10 @@ MAX_YAW_RATE = math.radians(30)   # (rad/s)
 MAX_YAW_ACC = math.radians(30)    # (rad/s^2)
 YAW_TAU = 1.0             # (s), >= MAX_YAW_RATE / MAX_YAW_ACC
 
-# Virtual sticks, sent as MAVLink because the uXRCE-DDS client of PX4 1.14 has no /fmu/in/manual_control_input.
-# velocity_to_sticks() inverts what PX4 does with them: values of the PX4 parameters with the same name
-# (here the PX4 1.14 defaults, MPC_POS_MODE = 4).
-MAVLINK_URL = "udpout:127.0.0.1:14580"  # SITL; on the real drone the MAVLink port of the flight controller
+# Virtual sticks, sent as MAVLink because the uXRCE-DDS client of PX4 1.14 has no
+# /fmu/in/manual_control_input. velocity_to_sticks() inverts what PX4 does with them: values of the
+# PX4 parameters with the same name (here the PX4 1.14 defaults, MPC_POS_MODE = 4).
+MAVLINK_URL = "udpout:127.0.0.1:14580"  # SITL (PX4 instance 0); real drone: a MAVLink port of the FC
 MPC_HOLD_DZ = 0.1         # stick deadzone
 MPC_XY_MAN_EXPO = 0.6
 MPC_Z_MAN_EXPO = 0.6
@@ -109,7 +136,7 @@ MPC_VEL_MANUAL = 10.0     # (m/s)
 MPC_Z_VEL_MAX_UP = 3.0    # (m/s)
 MPC_Z_VEL_MAX_DN = 1.5    # (m/s)
 MPC_MAN_Y_MAX = math.radians(150)   # (rad/s)
-VEL_GAIN = 1.0            # corrects the difference between the smoothed and the real velocity, (m/s^2) per m/s
+VEL_GAIN = 1.0            # corrects the smoothed minus the real velocity, (m/s^2) per m/s
 YAW_GAIN = 1.0            # keeps the heading on the smoothed yaw, (rad/s) per rad
 
 # Flight log (flight_logger.py): one folder per flight with flight.csv, vfh.npz and plots
@@ -118,7 +145,9 @@ LOG_RATE = 10.0           # rows per second
 
 # Depth camera
 DEPTH_STRIDE = 8          # use every 8th pixel
-DEPTH_MIN = 0.3           # (m)
+# The real camera sees the front propellers (nearest returns 0.3-0.53 m). Obstacles seen
+# from farther away stay in the 3DVFH+ point memory (memory_time) as the drone gets closer.
+DEPTH_MIN = 1.0           # ignore depth closer than this (m)
 DEPTH_MAX = 12.0          # (m), >= VFH3D hist_radius so obstacles are seen early enough
 DEPTH_TIMEOUT = 0.5       # hold position if no depth image for this long (s)
 CAM_OFFSET = np.array([0.10, 0.0, 0.0])  # camera position in body FRD (m); camera faces forward, level
@@ -178,8 +207,8 @@ def clip_norm(v, max_norm):
 
 
 def stick_from_expo(value, expo):
-    """Inverse of PX4 math::expo_deadzone(): the stick position [-1, 1] that gives this value after PX4's
-    deadzone (MPC_HOLD_DZ) and expo curve"""
+    """Inverse of PX4 math::expo_deadzone(): the stick position [-1, 1] that gives this value after
+    PX4's deadzone (MPC_HOLD_DZ) and expo curve"""
     target = min(abs(float(value)), 1.0)
     if target < 1e-4:
         return 0.0
@@ -210,13 +239,14 @@ class SetpointSmoother:
 
 
 def velocity_to_sticks(smooth, vel_ne, heading):
-    """Smoothed setpoints -> sticks (pitch, roll, throttle, yaw), so that PX4 flies them in Position mode.
-    Horizontal (PX4 StickAccelerationXY): velocity change = stick * acc_scale - drag, stick in the heading frame.
-    Vertical and yaw (PX4 FlightTaskManualAltitude, StickYaw): the stick sets the speed directly."""
+    """Smoothed setpoints -> sticks (pitch, roll, throttle, yaw), so that PX4 flies them in Position
+    mode. Horizontal (PX4 StickAccelerationXY): velocity change = stick * acc_scale - drag, stick in
+    the heading frame. Vertical and yaw (PX4 FlightTaskManualAltitude, StickYaw): the stick sets the
+    speed directly."""
     vel, acc = smooth.vel[:2], smooth.acc[:2]
     speed = float(np.linalg.norm(vel))
     pitch, roll = 0.0, 0.0
-    if speed > 0.02 or float(np.linalg.norm(acc)) > 0.02:   # else centered: PX4 brakes and holds the GPS position
+    if speed > 0.02 or float(np.linalg.norm(acc)) > 0.02:   # else centered: PX4 brakes and holds
         acc_scale = 2.0 * MPC_ACC_HOR
         drag_speed = math.sqrt(speed) if speed < 1.0 else speed
         drag = acc_scale / MPC_VEL_MANUAL * drag_speed * vel / max(speed, 1e-6)
@@ -225,7 +255,8 @@ def velocity_to_sticks(smooth, vel_ne, heading):
         roll = stick_from_expo(-math.sin(heading) * north + math.cos(heading) * east, MPC_XY_MAN_EXPO)
 
     down = float(smooth.vel[2])
-    throttle = stick_from_expo(-down / (MPC_Z_VEL_MAX_DN if down > 0.0 else MPC_Z_VEL_MAX_UP), MPC_Z_MAN_EXPO)
+    throttle = stick_from_expo(-down / (MPC_Z_VEL_MAX_DN if down > 0.0 else MPC_Z_VEL_MAX_UP),
+                               MPC_Z_MAN_EXPO)
 
     yaw_rate = smooth.yaw_rate + YAW_GAIN * wrap_pi(smooth.yaw - heading)
     yaw = stick_from_expo(yaw_rate / MPC_MAN_Y_MAX, MPC_YAW_EXPO) if abs(yaw_rate) > math.radians(1) else 0.0
@@ -234,7 +265,7 @@ def velocity_to_sticks(smooth, vel_ne, heading):
 
 class GoToGPSPoint(Node):
     def __init__(self):
-        super().__init__("go_to_gps_point")
+        super().__init__("obstacle_avoidance_static_gps")
         self.latest = {}    # newest message of each topic
         self.stamp = {}     # time each topic was last received
         # PX4 publishes best-effort, so the subscriber QoS must match
@@ -256,11 +287,12 @@ class GoToGPSPoint(Node):
         self.command_pub = self.create_publisher(VehicleCommand, "/fmu/in/vehicle_command", qos)
         self.mavlink = mavutil.mavlink_connection(MAVLINK_URL, source_system=255)
 
-        # Current velocity setpoint, turned into sticks by the timer through the smoother. None = sticks
+        # Current velocity target, turned into sticks by the timer through the smoother. None = sticks
         # centered: they are always sent, PX4 needs them to enter and stay in Position mode.
         self.setpoint = None
         self.smooth = SetpointSmoother()
         self.sticks = (0.0, 0.0, 0.0, 0.0)      # pitch, roll, throttle, yaw
+        self.stale = False      # True while the local position is older than LPOS_TIMEOUT
         self.create_timer(1.0 / SETPOINT_RATE, self.publish_sticks)
 
         self.vfh = VFH3D()
@@ -297,6 +329,9 @@ class GoToGPSPoint(Node):
     def in_position_mode(self):
         return self.latest["status"].nav_state == VehicleStatus.NAVIGATION_STATE_POSCTL
 
+    def lpos_stale(self):
+        return time.monotonic() - self.stamp["local_position"] > LPOS_TIMEOUT
+
     def position(self):
         lp = self.latest["local_position"]
         return np.array([lp.x, lp.y, lp.z]), lp.heading
@@ -314,23 +349,38 @@ class GoToGPSPoint(Node):
         return goal[2] if USE_GOAL_ALT else self.height()[1] - FLIGHT_ALT
 
     # ---------- commands ----------
-    def timestamp(self):
-        return int(self.get_clock().now().nanoseconds / 1000)
-
+    # Commands to PX4 have timestamp 0: PX4 stamps them on arrival. With the ROS clock PX4 converts the
+    # time with its estimate of the clock offset, which drifts by seconds when SITL runs slower than
+    # real time.
     def publish_sticks(self):
+        """Virtual sticks (timer): the smoothed velocity and yaw as stick positions, centered while
+        there is no setpoint"""
         if "status" not in self.latest:
             return
         sp = self.setpoint
         if sp is None:
             self.sticks = (0.0, 0.0, 0.0, 0.0)
         else:
-            self.smooth.update(sp["velocity"], sp["yaw"], 1.0 / SETPOINT_RATE)
+            # No recent local position: brake through the smoother (no stick step) and keep the
+            # heading, without feedback from the old velocity and heading. PX4 still flies on its
+            # own estimate.
+            stale = self.lpos_stale()
+            if stale != self.stale:
+                print(f"-- No local position for {LPOS_TIMEOUT} s: braking and waiting" if stale
+                      else "-- Local position from PX4 again")
+                self.stale = stale
+            self.smooth.update(np.zeros(3) if stale else sp["velocity"],
+                               self.smooth.yaw if stale else sp["yaw"], 1.0 / SETPOINT_RATE)
             lp = self.latest["local_position"]
-            self.sticks = velocity_to_sticks(self.smooth, (lp.vx, lp.vy), lp.heading)
+            if stale:
+                self.sticks = velocity_to_sticks(self.smooth, self.smooth.vel[:2], self.smooth.yaw)
+            else:
+                self.sticks = velocity_to_sticks(self.smooth, (lp.vx, lp.vy), lp.heading)
         pitch, roll, throttle, yaw = self.sticks
         # MANUAL_CONTROL: x, y, r in [-1000, 1000], z (throttle) in [0, 1000] with 500 = centered
-        self.mavlink.mav.manual_control_send(self.latest["status"].system_id, round(pitch * 1000), round(roll * 1000),
-                                             round((throttle + 1.0) * 500), round(yaw * 1000), 0)
+        self.mavlink.mav.manual_control_send(self.latest["status"].system_id, round(pitch * 1000),
+                                             round(roll * 1000), round((throttle + 1.0) * 500),
+                                             round(yaw * 1000), 0)
 
     def log_row(self):
         """One row of flight.csv (timer, LOG_RATE)"""
@@ -346,6 +396,7 @@ class GoToGPSPoint(Node):
         terms = self.vfh.cost_terms if planning else {}
         row = {
             "t": time.monotonic() - self.t0, "phase": self.phase, "holding": int(self.holding),
+            "stale": int(self.stale),                                     # old local position
             "armed": int(st.arming_state == VehicleStatus.ARMING_STATE_ARMED), "nav_state": st.nav_state,
             "north": lp.x, "east": lp.y, "alt": self.start_z - lp.z,      # alt: EKF, above the take-off point
             "agl": lp.dist_bottom if source == "sensor" else math.nan,    # distance sensor, above the ground
@@ -378,11 +429,11 @@ class GoToGPSPoint(Node):
         self.logger.log(row)
 
     def fly_velocity(self, vel, yaw):
-        self.setpoint = {"velocity": vel, "yaw": yaw}
+        self.setpoint = {"velocity": np.asarray(vel, dtype=float), "yaw": yaw}
 
     def send_command(self, command, p1=0.0, p2=0.0, p3=0.0):
         msg = VehicleCommand()
-        msg.timestamp = self.timestamp()
+        msg.timestamp = 0
         msg.command = command
         msg.param1, msg.param2, msg.param3 = float(p1), float(p2), float(p3)
         msg.target_system = self.latest["status"].system_id   # PX4 ignores commands for another system_id
@@ -432,6 +483,9 @@ class GoToGPSPoint(Node):
         pos, heading = self.position()
         dist_xy = math.hypot(goal[0] - pos[0], goal[1] - pos[1])
 
+        if self.lpos_stale():   # old pose: depth points would go to wrong places in memory
+            self.hold_here(heading, "No local position from PX4")
+            return dist_xy
         if time.monotonic() - self.stamp["depth"] > DEPTH_TIMEOUT:
             self.hold_here(heading, "No depth image")
             return dist_xy
@@ -517,8 +571,9 @@ class GoToGPSPoint(Node):
 
 
 def switch_to_hold(node):
-    """Center the sticks (PX4 brakes), then ask for Hold until PX4 stays in it: a stick that is still moving, also
-    back to the center, makes PX4 switch from Hold back to Position mode (COM_RC_OVERRIDE)"""
+    """Center the sticks (PX4 brakes), then ask for Hold until PX4 stays in it: a stick that is still
+    moving, also back to the center, makes PX4 switch from Hold back to Position mode
+    (COM_RC_OVERRIDE)"""
     node.setpoint = None
     t0 = time.monotonic()
     last_send = t0
@@ -538,10 +593,10 @@ def switch_to_hold(node):
 
 
 def check_flying(node):
-    if not node.is_armed():     # PX4 disarms when the drone doesn't lift off, e.g. because it ignores the node's sticks
+    if not node.is_armed():     # PX4 disarms when the drone doesn't lift off, e.g. it ignores the sticks
         raise RuntimeError("Drone disarmed (never lifted off? check COM_RC_IN_MODE)")
     if not node.in_position_mode():
-        raise RuntimeError("Drone left Position mode (pilot took over)")
+        raise RuntimeError("Drone left Position mode (pilot took over, or a PX4 failsafe)")
 
 
 def final_approach(node, goal):
@@ -552,6 +607,10 @@ def final_approach(node, goal):
     settled_since = None
     while time.monotonic() - t0 < APPROACH_TIMEOUT:
         check_flying(node)
+        if node.lpos_stale():   # wait for it (publish_sticks brakes), no landing because of it
+            settled_since = None
+            time.sleep(1.0 / PLAN_RATE)
+            continue
         if not node.way_clear(goal):
             return False
         pos, _ = node.position()
@@ -595,8 +654,23 @@ def fly(node, goal):
         time.sleep(0.1)
     print("-- Armed, Position mode")
 
-    # Take off straight up: climb at TAKEOFF_SPEED, brake gently (MAX_ACC / 4) before the flight
-    # altitude, done when there and no longer climbing (the smoothed setpoint lags the target)
+    # Lift off quickly (LIFTOFF_SPEED): the throttle stick also passes PX4's take-off threshold
+    node.phase = "liftoff"
+    t_start = time.monotonic()
+    h_start, _, src_start = node.height()
+    floor = (h_start if src_start == "sensor" else 0.0) + LIFTOFF_HEIGHT
+    while True:
+        check_flying(node)
+        h, _, src = node.height()
+        climbing = node.latest["local_position"].vz < -0.5 * LIFTOFF_SPEED
+        if climbing or (src == "sensor" and h > floor):
+            break
+        node.fly_velocity(np.array([0.0, 0.0, -LIFTOFF_SPEED]), yaw)
+        time.sleep(1.0 / PLAN_RATE)
+    print(f"-- Off the ground after {time.monotonic() - t_start:.1f} s")
+
+    # Climb at TAKEOFF_SPEED holding the point where it lifted off, brake gently (MAX_ACC / 4)
+    # before the flight altitude, done when there and no longer climbing (the setpoint lags)
     node.phase = "takeoff"
     while True:
         check_flying(node)
@@ -646,13 +720,14 @@ def fly(node, goal):
     print("-- Landing")
     while node.is_armed():
         if not node.in_position_mode():
-            raise RuntimeError("Drone left Position mode (pilot took over)")
+            raise RuntimeError("Drone left Position mode (pilot took over, or a PX4 failsafe)")
         height = node.height()[0]
         descent = float(np.clip(LAND_GAIN * height, LAND_SPEED_MIN, LAND_SPEED))
         north, east = node.velocity_towards(target) if height > LAND_FIX_HEIGHT else (0.0, 0.0)
         node.fly_velocity(np.array([north, east, descent]), node.smooth.yaw)
         time.sleep(0.1)
     node.setpoint = None
+    time.sleep(3.0 / LOG_RATE)  # rows with the drone disarmed: flight_eval.py reads the last row
     pos, _ = node.position()
     print(f"-- Landed and disarmed, {math.hypot(goal[0] - pos[0], goal[1] - pos[1]):.2f} m from the center of the goal")
 

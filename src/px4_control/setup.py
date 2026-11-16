@@ -25,7 +25,6 @@ setup(
     entry_points={
         'console_scripts': [
             'arm_disarm = px4_control.arm_disarm:main',
-            'takeoff_land_indoor = px4_control.takeoff_land_indoor:main',
             'takeoff_land_mission_offboard = px4_control.takeoff_land_mission_offboard:main',
             'takeoff_land_mission_gps = px4_control.takeoff_land_mission_gps:main',
             'takeoff_hold_mission_offboard = px4_control.takeoff_hold_mission_offboard:main',
@@ -34,9 +33,8 @@ setup(
             'record_drone_state   = px4_control.record_drone_state:main',
             'fly_setpoints_mission = px4_control.fly_setpoints_mission:main',
             'fly_setpoints_takephoto_mission = px4_control.fly_setpoints_takephoto_mission:main',
-            'obstacle_avoidance_static_indoor = px4_control.obstacle_avoidance_static_indoor:main',
             'obstacle_avoidance_static_gps = px4_control.obstacle_avoidance_static_gps:main',
-            'obstacle_avoidance_test = px4_control.obstacle_avoidance_test:main',
+            'obstacle_avoidance_static_offboard = px4_control.obstacle_avoidance_static_offboard:main',
             'obstacle_hold_gps = px4_control.obstacle_hold_gps:main',
         ],
     },
