@@ -10,7 +10,11 @@ Description: 3DVFH+ obstacle avoidance (no ROS code), used by go_to_gps_point.py
              (x = North, y = East, z = Down).
 
 Pipeline (each planning step):
-    1. add_points()       : keep a memory of obstacle points (voxel filtered)
+    1. add_points()       : keep a memory of obstacle points (voxel filtered). A point enters
+                            it only when its confirm_voxel cell was seen in confirm_frames depth
+                            images within confirm_time (flickering depth noise stays out); the
+                            other points of the image are kept in rejected, and the polar
+                            histogram of all points of the image (frame), both for the flight log
     2. build_histogram()  : 2D polar histogram (azimuth x elevation), closest distance per bin
                             + enlarge each obstacle by the drone/safety radius
                             + binary histograms (blocked / free) with hysteresis, one per look-ahead
@@ -22,7 +26,7 @@ Pipeline (each planning step):
                              + other side of the goal than the obstacle is being passed on)
                             + speed_factor from the obstacles in front of that direction
 
-Last Modified: 2026-10-22
+Last Modified: 2026-11-20
 """
 
 ALPHA = 6.0                    # histogram bin size (degrees)
@@ -50,6 +54,42 @@ def direction_to_bin(d):
     return min(int((el + 90.0) // ALPHA), N_EL - 1), int(az // ALPHA) % N_AZ
 
 
+def voxel_keys(points, size):
+    """
+    Points (N, 3) -> one int64 per point naming its voxel of edge size (m).
+
+    For fast set operations. Valid within 2**20 voxels of the origin (210 km for 0.2 m voxels).
+    """
+    idx = np.floor(np.asarray(points, dtype=float).reshape(-1, 3) / size).astype(np.int64)
+    idx += 1 << 20
+    return (idx[:, 0] << 42) | (idx[:, 1] << 21) | idx[:, 2]
+
+
+def voxel_index(keys):
+    """voxel_keys() -> integer voxel indices (N, 3); voxel centre = (index + 0.5) * size."""
+    keys = np.asarray(keys, dtype=np.int64)
+    mask = (1 << 21) - 1
+    return np.stack([(keys >> 42) & mask, (keys >> 21) & mask, keys & mask], axis=1) - (1 << 20)
+
+
+def polar_histogram(rel, max_dist):
+    """
+    Points relative to the drone (NED) -> closest distance per bin, shape (N_EL, N_AZ), inf = none.
+
+    Points closer than 0.1 m or farther than max_dist are left out.
+    """
+    dist = np.linalg.norm(rel, axis=1)
+    m = (dist > 0.1) & (dist < max_dist)
+    rel, dist = rel[m], dist[m]
+    az = np.degrees(np.arctan2(rel[:, 1], rel[:, 0])) % 360.0
+    el = np.degrees(np.arcsin(np.clip(-rel[:, 2] / dist, -1.0, 1.0)))
+    a = (az // ALPHA).astype(int) % N_AZ
+    e = np.clip(((el + 90.0) // ALPHA).astype(int), 0, N_EL - 1)
+    hist = np.full((N_EL, N_AZ), np.inf)
+    np.minimum.at(hist, (e, a), dist)
+    return hist
+
+
 class VFH3D:
     def __init__(self,
                  hist_radius=11.0,    # only obstacles closer than this are put in the histogram (m),
@@ -63,6 +103,11 @@ class VFH3D:
                  max_elev=25.0,       # max climb/descent angle of a candidate direction (deg)
                  memory_time=30.0,    # how long obstacle points are remembered (s)
                  voxel=0.2,           # voxel size of the point memory (m)
+                 confirm_frames=3,    # a point enters the memory once its confirm_voxel cell was
+                                      # seen in this many depth images (1 = all points at once)
+                 confirm_time=0.5,    # ... within this time (s); at 10 Hz: 3 of the last 5 images
+                 confirm_voxel=0.4,   # cell size of that check (m), coarser than voxel: depth
+                                      # noise moves the points of a surface between small voxels
                  side_hold=10,        # steps the goal direction must stay free before the side is forgotten
                  k_goal=5.0, k_prev=2.0, k_head=1.0, k_elev=1.0,   # cost weights
                  k_side=4.0):         # cost of a bin on the other side of the goal than the one chosen
@@ -76,6 +121,8 @@ class VFH3D:
         self.max_elev = math.radians(max_elev)
         self.memory_time = memory_time
         self.voxel = voxel
+        self.confirm_frames, self.confirm_time = confirm_frames, confirm_time
+        self.confirm_voxel = confirm_voxel
         self.k_goal, self.k_prev, self.k_head, self.k_elev = k_goal, k_prev, k_head, k_elev
         self.side_hold, self.k_side = side_hold, k_side
         # Side of the goal direction the drone goes around the obstacle: +1 right, -1 left, 0 none yet.
@@ -85,6 +132,10 @@ class VFH3D:
 
         self.mem_pts = np.empty((0, 3))     # remembered obstacle points (NED)
         self.mem_t = np.empty(0)            # time each point was seen
+        # (stamp, confirm_voxel cells seen) of the depth images of the last confirm_time
+        self.recent = []
+        self.rejected = np.empty((0, 3))    # points of the last image left out of the memory
+        self.frame = np.full((N_EL, N_AZ), np.inf)      # same, last add_points() only
         self.raw = np.full((N_EL, N_AZ), np.inf)        # closest distance per bin (not enlarged)
         self.hist = np.full((N_EL, N_AZ), np.inf)       # enlarged histogram: closest distance per bin
         self.blocked = {d: np.zeros((N_EL, N_AZ), dtype=bool)   # binary histogram per look-ahead distance
@@ -98,9 +149,15 @@ class VFH3D:
         self.cost_terms = {}
 
     def add_points(self, points, stamp, pos):
+        """Points (NED) of one new depth image: once per image, the stability check counts them."""
+        # What the camera sees now, for the flight log (not used for planning)
+        new = np.asarray(points, dtype=float).reshape(-1, 3)
+        self.frame = polar_histogram(new - pos, self.hist_radius)
+        new = self.stable_points(new, stamp)
+
         # Newest points first, so np.unique keeps the newest point of each voxel
-        self.mem_pts = np.vstack([points, self.mem_pts])
-        self.mem_t = np.concatenate([np.full(len(points), stamp), self.mem_t])
+        self.mem_pts = np.vstack([new, self.mem_pts])
+        self.mem_t = np.concatenate([np.full(len(new), stamp), self.mem_t])
 
         # Forget old points and points far away from the drone
         keep = (stamp - self.mem_t < self.memory_time) & \
@@ -113,19 +170,27 @@ class VFH3D:
             _, idx = np.unique(keys, axis=0, return_index=True)
             self.mem_pts, self.mem_t = self.mem_pts[idx], self.mem_t[idx]
 
-    def build_histogram(self, pos):
-        rel = self.mem_pts - pos
-        dist = np.linalg.norm(rel, axis=1)
-        m = (dist > 0.1) & (dist < self.hist_radius)
-        rel, dist = rel[m], dist[m]
+    def stable_points(self, points, stamp):
+        """
+        Points whose confirm_voxel cell was in confirm_frames of the last confirm_time's images.
 
+        This image included. A real obstacle stays in its cells (local frame) from image to image;
+        depth noise and flicker do not. The other points go to self.rejected.
+        """
+        keys = voxel_keys(points, self.confirm_voxel)
+        self.recent = [(t, c) for t, c in self.recent if stamp - t < self.confirm_time]
+        self.recent.append((stamp, np.unique(keys)))
+        if self.confirm_frames <= 1:
+            self.rejected = np.empty((0, 3))
+            return points
+        cells, count = np.unique(np.concatenate([c for _, c in self.recent]), return_counts=True)
+        ok = np.isin(keys, cells[count >= self.confirm_frames])
+        self.rejected = points[~ok]
+        return points[ok]
+
+    def build_histogram(self, pos):
         # Polar histogram: closest obstacle distance in every bin
-        az = np.degrees(np.arctan2(rel[:, 1], rel[:, 0])) % 360.0
-        el = np.degrees(np.arcsin(np.clip(-rel[:, 2] / dist, -1.0, 1.0)))
-        a = (az // ALPHA).astype(int) % N_AZ
-        e = np.clip(((el + 90.0) // ALPHA).astype(int), 0, N_EL - 1)
-        raw = np.full((N_EL, N_AZ), np.inf)
-        np.minimum.at(raw, (e, a), dist)
+        raw = polar_histogram(self.mem_pts - pos, self.hist_radius)
         self.raw = raw
 
         # Enlarge every obstacle by the safety radius: closer obstacle -> wider angle
