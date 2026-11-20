@@ -8,6 +8,8 @@ import time
 
 import numpy as np
 
+from px4_control.vfh3d import voxel_keys, voxel_index
+
 """
 Script Name: flight_logger.py
 Description: Records a flight of obstacle_avoidance_static_gps.py for analysis (no ROS code).
@@ -15,8 +17,14 @@ Description: Records a flight of obstacle_avoidance_static_gps.py for analysis (
                  flight.csv      one row per log step: position, velocity, setpoints, GPS, altitude (EKF)
                                  and height above the ground (distance sensor), 3DVFH+ decision and
                                  cost terms, distances to obstacles, ...
-                 vfh.npz         every planning step: polar histogram, cost map, blocked bins,
-                                 goal / chosen direction; all obstacle points seen (0.3 m grid)
+                 vfh.npz         every planning step: polar histogram (hist: enlarged by the
+                                 safety radius, raw: not enlarged, frame: points of that depth
+                                 image only), cost map, blocked bins, goal / chosen direction;
+                                 all obstacle points seen (0.3 m grid);
+                                 vox_*: the 3DVFH+ point memory after every depth image
+                                 (voxels that entered and left it, voxels of the image the
+                                 stability check left out, drone position and yaw), for
+                                 tools/oa/voxel_video.py
                  path.png        top and side view of the path over the obstacles
                  timeseries.png  distance, speed, altitude, yaw, cost terms, acceleration over time
                  decision_*.png  polar histogram and cost map at the first avoidance step
@@ -26,7 +34,7 @@ Description: Records a flight of obstacle_avoidance_static_gps.py for analysis (
 Re-plot a saved flight:
     python3 -m px4_control.flight_logger flight_logs/<date>_<time>
 
-Last Modified: 2026-10-22
+Last Modified: 2026-11-20
 """
 
 MAP_VOXEL = 0.3     # grid of the obstacle map (m)
@@ -40,7 +48,12 @@ class FlightLogger:
         self.file = None            # flight.csv, opened at the first row (columns = keys of that row)
         self.closed = False         # set by save(): rows logged after that are dropped
         self.voxels = set()         # obstacle map
-        self.steps = {k: [] for k in ("t", "pos", "hist", "cost", "blocked", "goal_dir", "direction")}
+        self.steps = {k: [] for k in ("t", "pos", "hist", "raw", "frame", "cost", "blocked",
+                                      "goal_dir", "direction")}
+        # 3DVFH+ point memory after each depth image, as changes (add_voxels)
+        self.vox = {k: [] for k in ("t", "pos", "yaw", "add", "del", "rej")}
+        self.vox_size = None
+        self.mem_keys = np.empty(0, dtype=np.int64)   # memory voxels at the last add_voxels()
 
     def log(self, row):
         if self.closed:
@@ -59,6 +72,44 @@ class FlightLogger:
         if len(points):
             self.voxels.update(map(tuple, np.unique(np.floor(points / MAP_VOXEL).astype(np.int32), axis=0)))
 
+    def add_voxels(self, t, pos, yaw, vfh):
+        """
+        3DVFH+ point memory after one depth image (vfh.add_points), as changes.
+
+        The voxels that entered and left it since the last call, and the voxels of this image left
+        out by the stability check that are not in the memory.
+        pos = drone position (NED), yaw (rad).
+        """
+        self.vox_size = vfh.voxel
+        keys = np.unique(voxel_keys(vfh.mem_pts, vfh.voxel))
+        rejected = np.setdiff1d(np.unique(voxel_keys(vfh.rejected, vfh.voxel)), keys,
+                                assume_unique=True)
+        self.vox["add"].append(np.setdiff1d(keys, self.mem_keys, assume_unique=True))
+        self.vox["del"].append(np.setdiff1d(self.mem_keys, keys, assume_unique=True))
+        self.vox["rej"].append(rejected)
+        self.vox["t"].append(t)
+        self.vox["pos"].append(np.asarray(pos, dtype=np.float32))
+        self.vox["yaw"].append(yaw)
+        self.mem_keys = keys
+
+    def voxel_arrays(self):
+        """
+        Return the add_voxels() data for vfh.npz.
+
+        vox_<add|del|rej> = voxel indices (int32, N x 3, voxel centre = (index + 0.5) * vox_size,
+        NED) of all images one after the other, vox_<...>_n = count per image.
+        """
+        if not self.vox["t"]:
+            return {}
+        out = {"vox_t": np.array(self.vox["t"]),
+               "vox_pos": np.array(self.vox["pos"], dtype=np.float32),
+               "vox_yaw": np.array(self.vox["yaw"], dtype=np.float32),
+               "vox_size": np.float32(self.vox_size)}
+        for k in ("add", "del", "rej"):
+            out[f"vox_{k}"] = voxel_index(np.concatenate(self.vox[k])).astype(np.int32)
+            out[f"vox_{k}_n"] = np.array([len(a) for a in self.vox[k]], dtype=np.int32)
+        return out
+
     def add_step(self, t, pos, vfh, goal_dir, direction):
         """3DVFH+ state of one planning step. pos = (north, east, altitude above take-off),
         blocked: bit 0 = early_dist, 1 = block_dist, 2 = slow_dist"""
@@ -68,6 +119,8 @@ class FlightLogger:
         self.steps["t"].append(t)
         self.steps["pos"].append(np.asarray(pos, dtype=np.float32))
         self.steps["hist"].append(np.minimum(vfh.hist, 99.0).astype(np.float16))     # 99 = no obstacle
+        self.steps["raw"].append(np.minimum(vfh.raw, 99.0).astype(np.float16))
+        self.steps["frame"].append(np.minimum(vfh.frame, 99.0).astype(np.float16))
         self.steps["cost"].append(np.minimum(vfh.cost, 999.0).astype(np.float16))    # 999 = not a candidate
         self.steps["blocked"].append(blocked)
         self.steps["goal_dir"].append(np.asarray(goal_dir, dtype=np.float32))
@@ -82,7 +135,8 @@ class FlightLogger:
             self.file = None
         obstacles = (np.array(sorted(self.voxels), dtype=np.float32).reshape(-1, 3) + 0.5) * MAP_VOXEL
         np.savez_compressed(os.path.join(self.dir, "vfh.npz"), obstacles=obstacles,
-                            **{k: np.array(v) for k, v in self.steps.items()})
+                            **{k: np.array(v) for k, v in self.steps.items()},
+                            **self.voxel_arrays())
         try:
             plot(self.dir)
         except Exception as e:      # never lose the data because of a plot

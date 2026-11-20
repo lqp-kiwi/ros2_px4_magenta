@@ -26,7 +26,7 @@ PARAMS = {
     'camera_name': 'camera',
 
     # RGB stream
-    'enable_color': True,
+    'enable_color': False,
     'color_width': 640,
     'color_height': 360,
     'color_fps': 30,           # 15 = even lighter
@@ -40,7 +40,7 @@ PARAMS = {
     'depth_format': 'Y16',
 
     # Point cloud
-    'enable_point_cloud': True,
+    'enable_point_cloud': False,
     'point_cloud_decimation_filter_factor': 2,  # 1 = all points, 4 = fewer
 
     # Depth range: drop everything nearer than min / farther than max (mm).
@@ -66,7 +66,7 @@ PARAMS = {
 # Extra params for --rgb-cloud (depth aligned to color, then colored)
 RGB_CLOUD = {
     'enable_point_cloud': False,
-    'enable_colored_point_cloud': True,
+    'enable_colored_point_cloud': False,
     'depth_registration': True,
     'align_mode': 'SW',  # 'HW' is not supported by this camera
     'depth.image_unaligned.enable_pub_plugins': '[image_transport/raw]',
