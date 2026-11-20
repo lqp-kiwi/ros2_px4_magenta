@@ -22,6 +22,10 @@ from px4_control.gps_point import load_gps_point
 Script Name: obstacle_avoidance_static_offboard.py
 Description: Takes off, flies to the GPS point saved in a .json file by record_drone_state.py
              and lands there. Obstacles seen by the depth camera are avoided with 3DVFH+ (vfh3d.py).
+             An obstacle point enters its memory only once seen in several depth images in a
+             row (vfh3d.py confirm_frames): flickering depth noise is not avoided. The flight log
+             has the memory after every image: tools/oa/voxel_video.py <log folder> makes a
+             video of it.
              The camera node (depth_camera package) must already be running.
              Copy of obstacle_avoidance_static_gps.py (2026-11-16), same OFFBOARD flight code.
              The whole flight is in OFFBOARD: from before arming until PX4 disarms after landing, the node streams
@@ -46,7 +50,7 @@ PX4 parameters:
     MPC_THR_HOVER        the real hover thrust (hover_thrust_estimate of a flight log), else
                          the lift-off is slow.
 
-Last Modified: 2026-11-16
+Last Modified: 2026-11-20
 
 Usage:
     MicroXRCEAgent udp4 -p 8888                              SITL
@@ -249,6 +253,7 @@ class GoToGPSPoint(Node):
         self.speed_factors = []     # (time, 3DVFH+ speed factor) of the last SPEED_HOLD_TIME
         self.height_source = None   # "sensor" or "ekf", to print when it changes
         self.rays = None        # pixel rays (body FRD) for the depth image
+        self.depth_used = None  # depth image last given to 3DVFH+
 
         # Flight log
         self.logger = None      # FlightLogger while flying
@@ -414,9 +419,9 @@ class GoToGPSPoint(Node):
         self.send_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, 1.0, 4.0, 3.0)   # AUTO, LOITER (Hold)
 
     # ---------- obstacle avoidance ----------
-    def depth_points(self, pos, ground_z):
-        """Newest depth image -> obstacle points in local NED (without the ground at local z ground_z)"""
-        msg, info = self.latest["depth"], self.latest["camera_info"]
+    def depth_points(self, msg, pos, ground_z):
+        """Depth image -> obstacle points in local NED (without the ground at local z ground_z)."""
+        info = self.latest["camera_info"]
         depth = depth_to_meters(msg)[::DEPTH_STRIDE, ::DEPTH_STRIDE]
         if self.rays is None or self.rays.shape[:2] != depth.shape:
             fx, fy, cx, cy = info.k[0], info.k[4], info.k[2], info.k[5]
@@ -428,6 +433,22 @@ class GoToGPSPoint(Node):
         p_body = self.rays[valid] * depth[valid][:, None] + CAM_OFFSET
         p_ned = p_body @ quat_to_rot(self.latest["attitude"].q).T + pos
         return p_ned[p_ned[:, 2] < ground_z - GROUND_IGNORE]   # drop ground points (z is down)
+
+    def sense(self, pos, heading, ground_z):
+        """
+        Newest depth image -> 3DVFH+ point memory, each image only once.
+
+        Its stability check counts images, and planning (PLAN_RATE) can be faster than the camera.
+        """
+        msg = self.latest["depth"]
+        if msg is self.depth_used:
+            return
+        self.depth_used = msg
+        points = self.depth_points(msg, pos, ground_z)
+        self.vfh.add_points(points, time.monotonic(), pos)
+        if self.logger is not None:
+            self.logger.add_obstacles(points)
+            self.logger.add_voxels(time.monotonic() - self.t0, pos, heading, self.vfh)
 
     def hold_here(self, heading, reason, scan=False):
         """Brake smoothly (velocity 0 through the smoother, not a position step) and wait"""
@@ -459,15 +480,13 @@ class GoToGPSPoint(Node):
             self.height_source = source
         goal_here = np.array([goal[0], goal[1], goal[2] if USE_GOAL_ALT else ground_z - FLIGHT_ALT])
 
-        points = self.depth_points(pos, ground_z)
-        self.vfh.add_points(points, time.monotonic(), pos)
+        self.sense(pos, heading, ground_z)
         direction = self.vfh.choose_direction(pos, goal_here, self.prev_dir, heading,
                                               allow_up=height < MAX_ALT, allow_down=height > MIN_ALT)
         self.plan_ms = (time.perf_counter() - t_start) * 1000
         to_goal = goal_here - pos
         goal_dir = to_goal / max(float(np.linalg.norm(to_goal)), 1e-6)
         if self.logger is not None:
-            self.logger.add_obstacles(points)
             self.logger.add_step(time.monotonic() - self.t0, (pos[0], pos[1], self.start_z - pos[2]), self.vfh,
                                  goal_dir, direction)
         if direction is None:
@@ -517,12 +536,9 @@ class GoToGPSPoint(Node):
         to the target, or there is no camera image"""
         if time.monotonic() - self.stamp["depth"] > DEPTH_TIMEOUT:
             return False
-        pos, _ = self.position()
-        points = self.depth_points(pos, self.height()[1])
-        self.vfh.add_points(points, time.monotonic(), pos)
+        pos, heading = self.position()
+        self.sense(pos, heading, self.height()[1])
         self.vfh.build_histogram(pos)
-        if self.logger is not None:
-            self.logger.add_obstacles(points)
         to_target = target[:2] - pos[:2]
         dist = float(np.linalg.norm(to_target))
         if dist < 0.05:     # there: no direction to look at
